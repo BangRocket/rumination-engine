@@ -1,0 +1,16 @@
+# Environment
+.env
+
+# Logs
+logs/
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# IDE
+.idea/
+.vscode/
+*.swp

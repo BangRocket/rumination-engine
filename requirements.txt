@@ -1,0 +1,5 @@
+anthropic>=0.40.0
+mem0ai[graph]>=0.1.0
+psycopg2-binary
+neo4j
+python-dotenv
