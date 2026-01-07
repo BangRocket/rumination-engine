@@ -1,0 +1,270 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Clara</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link href="https://fonts.googleapis.com/css2?family=Fraunces:wght@400;600&family=Source+Serif+4:wght@400&family=IBM+Plex+Mono:wght@400&display=swap" rel="stylesheet">
+  <style>
+    :root {
+      --bg: #FDF6EC;
+      --text: #3D3229;
+      --text-light: #6B5D4D;
+      --accent: #C17B5E;
+    }
+    
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    
+    html, body {
+      height: 100%;
+      background: var(--bg);
+      color: var(--text);
+    }
+    
+    body {
+      display: flex;
+      flex-direction: column;
+    }
+    
+    .header {
+      padding: 1rem 1.5rem;
+      font-family: 'Fraunces', serif;
+      font-size: 1.25rem;
+      font-weight: 600;
+      border-bottom: 1px solid rgba(0,0,0,0.05);
+    }
+    
+    .header a {
+      color: inherit;
+      text-decoration: none;
+    }
+    
+    .messages {
+      flex: 1;
+      overflow-y: auto;
+      padding: 2rem 1.5rem;
+    }
+    
+    .messages-inner {
+      max-width: 600px;
+      margin: 0 auto;
+    }
+    
+    .message {
+      margin-bottom: 1.75rem;
+      animation: fadeIn 0.3s ease;
+    }
+    
+    @keyframes fadeIn {
+      from { opacity: 0; transform: translateY(4px); }
+      to { opacity: 1; transform: translateY(0); }
+    }
+    
+    .message.clara {
+      font-family: 'IBM Plex Mono', monospace;
+      font-size: 0.925rem;
+      line-height: 1.75;
+    }
+    
+    .message.clara .label {
+      font-family: 'Fraunces', serif;
+      font-size: 0.75rem;
+      color: var(--text-light);
+      margin-bottom: 0.35rem;
+      text-transform: lowercase;
+      letter-spacing: 0.02em;
+    }
+    
+    .message.user {
+      font-family: 'Source Serif 4', serif;
+      font-size: 1rem;
+      line-height: 1.65;
+      padding-left: 1rem;
+      border-left: 2px solid rgba(0,0,0,0.08);
+      color: var(--text-light);
+    }
+    
+    .message.thinking .content {
+      opacity: 0.5;
+    }
+    
+    .input-area {
+      padding: 1rem 1.5rem 1.5rem;
+      border-top: 1px solid rgba(0,0,0,0.05);
+    }
+    
+    .input-container {
+      max-width: 600px;
+      margin: 0 auto;
+      position: relative;
+    }
+    
+    textarea {
+      width: 100%;
+      padding: 0.875rem 1rem;
+      font-family: 'Source Serif 4', serif;
+      font-size: 1rem;
+      line-height: 1.5;
+      border: 1px solid rgba(0,0,0,0.1);
+      border-radius: 6px;
+      background: white;
+      resize: none;
+      min-height: 52px;
+      max-height: 200px;
+    }
+    
+    textarea:focus {
+      outline: none;
+      border-color: var(--accent);
+    }
+    
+    textarea::placeholder {
+      color: rgba(0,0,0,0.3);
+    }
+  </style>
+</head>
+<body>
+  <header class="header"><a href="index.html">Clara</a></header>
+  
+  <main class="messages">
+    <div class="messages-inner" id="messages">
+      <!-- Messages appear here -->
+    </div>
+  </main>
+  
+  <div class="input-area">
+    <div class="input-container">
+      <textarea 
+        id="input" 
+        placeholder="Say something..." 
+        rows="1"
+        autofocus
+      ></textarea>
+    </div>
+  </div>
+
+  <script>
+    const messagesContainer = document.getElementById('messages');
+    const input = document.getElementById('input');
+    
+    // Auto-resize textarea
+    input.addEventListener('input', function() {
+      this.style.height = 'auto';
+      this.style.height = Math.min(this.scrollHeight, 200) + 'px';
+    });
+    
+    function addMessage(type, content) {
+      const msg = document.createElement('div');
+      msg.className = `message ${type}`;
+      
+      if (type === 'clara' || type === 'clara thinking') {
+        msg.className = type === 'clara thinking' ? 'message clara thinking' : 'message clara';
+        msg.innerHTML = `
+          <div class="label">clara</div>
+          <div class="content">${escapeHtml(content)}</div>
+        `;
+      } else {
+        msg.innerHTML = `<div class="content">${escapeHtml(content)}</div>`;
+      }
+      
+      messagesContainer.appendChild(msg);
+      messagesContainer.parentElement.scrollTop = messagesContainer.parentElement.scrollHeight;
+      return msg;
+    }
+    
+    function escapeHtml(text) {
+      const div = document.createElement('div');
+      div.textContent = text;
+      return div.innerHTML;
+    }
+    
+    function showThinking() {
+      const msg = document.createElement('div');
+      msg.className = 'message clara thinking';
+      msg.innerHTML = `
+        <div class="label">clara</div>
+        <div class="content">...</div>
+      `;
+      messagesContainer.appendChild(msg);
+      messagesContainer.parentElement.scrollTop = messagesContainer.parentElement.scrollHeight;
+      return msg;
+    }
+    
+    async function sendMessage() {
+      const text = input.value.trim();
+      if (!text) return;
+      
+      addMessage('user', text);
+      input.value = '';
+      input.style.height = 'auto';
+      
+      const thinkingMsg = showThinking();
+      
+      // TODO: Replace with actual API call to Clara's backend
+      // For now, simulate a response
+      setTimeout(() => {
+        thinkingMsg.classList.remove('thinking');
+        thinkingMsg.querySelector('.content').textContent = getSimulatedResponse(text);
+      }, 800 + Math.random() * 700);
+    }
+    
+    // Placeholder responses until real backend is connected
+    function getSimulatedResponse(userText) {
+      const lower = userText.toLowerCase();
+      
+      // Some basic pattern matching for demo purposes
+      if (lower.includes('hello') || lower.includes('hi') || lower.includes('hey')) {
+        return "Hey! Good to have you here. What's on your mind?";
+      }
+      if (lower.includes('how are you')) {
+        return "I'm here, which is kind of my whole thing. More importantly—how are *you*?";
+      }
+      if (lower.includes('sad') || lower.includes('depressed') || lower.includes('down')) {
+        return "I hear you. That heaviness is real. Want to talk about what's weighing on you, or do you just need to sit with it for a bit?";
+      }
+      if (lower.includes('anxious') || lower.includes('stressed') || lower.includes('worried')) {
+        return "Anxiety's a beast. Is it the 'something specific is looming' kind, or more the 'everything feels vaguely wrong' kind?";
+      }
+      if (lower.includes('tired') || lower.includes('exhausted')) {
+        return "Tired like you need sleep, or tired like you need something to change?";
+      }
+      if (lower.includes('thank')) {
+        return "Of course. I'm here whenever you need.";
+      }
+      
+      // Generic thoughtful responses
+      const responses = [
+        "Tell me more about that.",
+        "Huh. What's the part that's sitting with you most?",
+        "I hear you. What do you think is underneath that?",
+        "That makes sense. How long has this been on your mind?",
+        "Yeah, I get it. Is this new, or has it been brewing for a while?",
+        "Okay, I'm with you. What would help right now—talking it through, or just venting?",
+      ];
+      return responses[Math.floor(Math.random() * responses.length)];
+    }
+    
+    input.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter' && !e.shiftKey) {
+        e.preventDefault();
+        sendMessage();
+      }
+    });
+    
+    // Initialize
+    function init() {
+      const hasVisited = localStorage.getItem('clara_visited');
+      
+      if (hasVisited) {
+        addMessage('clara', "Hey, you're back. What's on your mind?");
+      } else {
+        addMessage('clara', "Hey. I'm Clara. What brings you by?");
+        localStorage.setItem('clara_visited', 'true');
+      }
+    }
+    
+    init();
+  </script>
+</body>
+</html>

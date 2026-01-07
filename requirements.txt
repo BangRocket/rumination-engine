@@ -1,5 +1,12 @@
+# Core
 anthropic>=0.40.0
-mem0ai[graph]>=0.1.0
-psycopg2-binary
-neo4j
 python-dotenv
+rich
+requests
+
+# Memory (mem0 + stores)
+mem0ai[graph]>=0.1.45
+
+# Database drivers
+psycopg2-binary
+neo4j>=5.0.0

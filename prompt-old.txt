@@ -1,0 +1,1 @@
+Iteratively develop a website for MyPalClara.com, a web-based version of MyPalClara (https://github.com/BangRocket/mypalclara).
