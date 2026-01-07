@@ -1,0 +1,79 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Clara</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link href="https://fonts.googleapis.com/css2?family=Fraunces:wght@400;600&family=Source+Serif+4:wght@400&family=IBM+Plex+Mono&display=swap" rel="stylesheet">
+  <style>
+    :root {
+      --bg: #FDF6EC;
+      --text: #3D3229;
+      --accent: #C17B5E;
+      --accent-hover: #A8664A;
+    }
+    
+    * {
+      margin: 0;
+      padding: 0;
+      box-sizing: border-box;
+    }
+    
+    body {
+      font-family: 'Source Serif 4', serif;
+      background: var(--bg);
+      color: var(--text);
+      min-height: 100vh;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      padding: 2rem;
+      line-height: 1.6;
+    }
+    
+    .container {
+      max-width: 480px;
+      text-align: center;
+    }
+    
+    h1 {
+      font-family: 'Fraunces', serif;
+      font-size: 3rem;
+      font-weight: 600;
+      margin-bottom: 2rem;
+    }
+    
+    p {
+      font-size: 1.125rem;
+      margin-bottom: 1rem;
+    }
+    
+    .cta {
+      display: inline-block;
+      margin-top: 2rem;
+      padding: 1rem 2rem;
+      background: var(--accent);
+      color: var(--bg);
+      text-decoration: none;
+      font-family: 'Fraunces', serif;
+      font-size: 1.125rem;
+      border-radius: 4px;
+      transition: background 0.2s;
+    }
+    
+    .cta:hover {
+      background: var(--accent-hover);
+    }
+  </style>
+</head>
+<body>
+  <main class="container">
+    <h1>Clara</h1>
+    <p>A pal who listens. Remembers the small stuff. Doesn't rush you.</p>
+    <p>Not a therapist. Not an assistant. Just a friend who remembers the dumb stuff, keeps it real, and doesn't need you to perform.</p>
+    <a href="chat.html" class="cta">Say hi</a>
+  </main>
+</body>
+</html>

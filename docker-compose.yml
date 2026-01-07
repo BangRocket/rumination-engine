@@ -1,5 +1,3 @@
-version: '3.8'
-
 services:
   postgres:
     image: pgvector/pgvector:pg16
@@ -7,6 +5,8 @@ services:
       POSTGRES_USER: ruminate
       POSTGRES_PASSWORD: ruminate
       POSTGRES_DB: mem0
+    ports:
+      - "5432:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
     healthcheck:
@@ -20,6 +20,9 @@ services:
     environment:
       NEO4J_AUTH: neo4j/ruminate123
       NEO4J_PLUGINS: '["apoc"]'
+    ports:
+      - "7687:7687"
+      - "7474:7474"
     volumes:
       - neo4j_data:/data
     healthcheck:
@@ -38,6 +41,11 @@ services:
       OPENAI_API_KEY: ${OPENAI_API_KEY}
       POSTGRES_HOST: postgres
       NEO4J_HOST: neo4j
+      PERSONALITY_NAME: ${PERSONALITY_NAME:-default}
+      THOUGHT_INTERVAL: ${THOUGHT_INTERVAL:-60}
+      MAX_TOKENS: ${MAX_TOKENS:-1024}
+      MAX_HISTORY: ${MAX_HISTORY:-10}
+      DISCORD_WEBHOOK_URL: ${DISCORD_WEBHOOK_URL:-}
     depends_on:
       postgres:
         condition: service_healthy
@@ -45,8 +53,12 @@ services:
         condition: service_healthy
     volumes:
       - ./logs:/app/logs
+      - ./personalities:/app/personalities:ro
       - ./prompt.txt:/app/prompt.txt:ro
+      - ./seeds.txt:/app/seeds.txt:ro
+      - ruminate_data:/data
 
 volumes:
   postgres_data:
   neo4j_data:
+  ruminate_data:

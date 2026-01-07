@@ -4,6 +4,9 @@
 # Logs
 logs/
 
+# Migration dumps
+migration_dumps/
+
 # Python
 __pycache__/
 *.py[cod]
@@ -14,3 +17,7 @@ venv/
 .idea/
 .vscode/
 *.swp
+
+.DS_Store
+
+.claude/

@@ -22,10 +22,13 @@ ruminate.py
 
 The main loop:
 1. Retrieves memories from mem0 (up to 20)
-2. Builds context with system prompt + memories + last thought
-3. Calls Claude to generate next thought
-4. Stores new thought in mem0
-5. Waits `THOUGHT_INTERVAL` seconds, repeats
+2. Builds context with system prompt + memories + thought history + original prompt
+3. Calls Claude (streaming) to generate next thought
+4. Executes any `::CMD::command::END::` commands found in the output
+5. Stores new thought in mem0
+6. Waits `THOUGHT_INTERVAL` seconds, repeats
+
+The AI can output `::STOP::` to terminate the session.
 
 ## Running the Application
 
@@ -45,13 +48,42 @@ docker compose down -v
 
 ## Configuration
 
-Key constants in `ruminate.py`:
+Environment variables (see `.env.example`):
+- `ANTHROPIC_MODEL`: Claude model to use
+- `ANTHROPIC_BASE_URL`: Custom endpoint (optional)
 - `THOUGHT_INTERVAL`: seconds between thoughts (default: 60)
-- `MODEL`: Claude model to use
 - `MAX_TOKENS`: max response length (default: 1024)
-- `USER_ID`: mem0 identity namespace (default: "ruminator")
+- `MAX_HISTORY`: number of previous thoughts in context (default: 10)
+- `DISCORD_WEBHOOK_URL`: optional webhook for thought output
 
-The system prompt in `prompt.txt` defines the "personality" and initial contemplation seed.
+## AI Capabilities
+
+The ruminating AI has access to:
+
+**Persistent Storage** (`/data` volume):
+- Files persist across container restarts
+- Docker named volume `ruminate_data`
+
+**Command Execution** (via `::CMD::command::END::` in output):
+- Allowed: `cat`, `cp`, `curl`, `date`, `echo`, `find`, `grep`, `head`, `jq`, `ls`, `mkdir`, `mv`, `rm`, `tail`, `touch`, `wc`, `wget`
+- 30-second timeout per command
+- Commands run in `/data` working directory
+- Results appear in the AI's context on next iteration
+
+## Personality System
+
+Personalities and prompts are separate, combined at runtime:
+
+- **Personality** (`personalities/*.txt`): Defines the mind's nature, style, inclinations
+- **Prompt** (`prompt.txt`): The initial contemplation seed
+
+Selection priority:
+1. `PERSONALITY_FILE` - explicit path
+2. `PERSONALITY` - inline env var
+3. `PERSONALITY_NAME` - name in `personalities/` dir (default, philosopher, creative)
+4. Built-in default
+
+The identity (for mem0 memory isolation) is extracted from the personality's first line (e.g., "You are a philosophical mind" → `philosophical_mind`).
 
 ## Dependencies
 
