@@ -107,7 +107,7 @@ logger.addHandler(console_handler)
 # Suppress noisy third-party loggers from console
 logging.getLogger("httpx").setLevel(logging.WARNING)
 logging.getLogger("anthropic").setLevel(logging.WARNING)
-logging.getLogger("openai").setLevel(logging.WARNING)
+logging.getLogger("mcp").setLevel(logging.WARNING)
 
 
 def log_file_only(msg: str):
@@ -229,14 +229,23 @@ MAX_HISTORY = int(os.environ.get("MAX_HISTORY", "10"))
 # Stop command - if the AI outputs this, the loop terminates
 STOP_COMMAND = "::STOP::"
 
+# Maximum tool-use iterations per thought (prevents runaway loops)
+MAX_TOOL_ITERATIONS = 20
+
 
 # === MCP Client Functions ===
 
-async def load_mcp_config(identity: str) -> dict:
+def load_mcp_config(identity: str) -> dict:
     """Load MCP server config, interpolating env vars."""
     config_path = os.environ.get("MCP_SERVERS_FILE", "/app/mcp_servers.json")
     if not Path(config_path).exists():
         config_path = "mcp_servers.json"
+
+    if not Path(config_path).exists():
+        raise FileNotFoundError(
+            f"MCP server config not found at '{config_path}'. "
+            "Create mcp_servers.json or set MCP_SERVERS_FILE."
+        )
 
     with open(config_path) as f:
         raw = f.read()
@@ -245,7 +254,10 @@ async def load_mcp_config(identity: str) -> dict:
 
     def replace_var(match):
         var_name = match.group(1)
-        return env.get(var_name, "")
+        value = env.get(var_name, "")
+        if not value and var_name in ("MEM0_API_KEY", "ANTHROPIC_API_KEY"):
+            log_file_only(f"WARNING: {var_name} is not set")
+        return value
 
     interpolated = re.sub(r'\$\{(\w+)\}', replace_var, raw)
     return json.loads(interpolated)
@@ -265,33 +277,42 @@ async def connect_mcp_servers(config: dict) -> tuple[dict, list[dict], list]:
     anthropic_tools = []
     active_contexts = []
 
-    for server_name, server_config in servers.items():
-        params = StdioServerParameters(
-            command=server_config["command"],
-            args=server_config.get("args", []),
-            env=server_config.get("env"),
-        )
+    try:
+        for server_name, server_config in servers.items():
+            params = StdioServerParameters(
+                command=server_config["command"],
+                args=server_config.get("args", []),
+                env=server_config.get("env"),
+            )
 
-        read_write_ctx = stdio_client(params)
-        read, write = await read_write_ctx.__aenter__()
-        active_contexts.append(read_write_ctx)
+            read_write_ctx = stdio_client(params)
+            read, write = await read_write_ctx.__aenter__()
+            active_contexts.append(read_write_ctx)
 
-        session_ctx = ClientSession(read, write)
-        session = await session_ctx.__aenter__()
-        active_contexts.append(session_ctx)
+            session_ctx = ClientSession(read, write)
+            session = await session_ctx.__aenter__()
+            active_contexts.append(session_ctx)
 
-        await session.initialize()
+            await session.initialize()
 
-        tools_result = await session.list_tools()
-        for tool in tools_result.tools:
-            tool_map[tool.name] = (session, server_name)
-            anthropic_tools.append({
-                "name": tool.name,
-                "description": tool.description or "",
-                "input_schema": tool.inputSchema,
-            })
+            tools_result = await session.list_tools()
+            for tool in tools_result.tools:
+                tool_map[tool.name] = (session, server_name)
+                anthropic_tools.append({
+                    "name": tool.name,
+                    "description": tool.description or "",
+                    "input_schema": tool.inputSchema,
+                })
 
-        log_file_only(f"MCP server '{server_name}': {len(tools_result.tools)} tools")
+            log_file_only(f"MCP server '{server_name}': {len(tools_result.tools)} tools")
+    except Exception:
+        # Clean up any already-opened contexts before re-raising
+        for ctx in reversed(active_contexts):
+            try:
+                await ctx.__aexit__(None, None, None)
+            except Exception:
+                pass
+        raise
 
     return tool_map, anthropic_tools, active_contexts
 
@@ -374,7 +395,7 @@ async def think(client: anthropic.AsyncAnthropic, tool_map: dict, anthropic_tool
     tool_names = [t["name"] for t in anthropic_tools]
     system, messages = build_context(thought_history, tool_names)
 
-    while True:
+    for iteration in range(MAX_TOOL_ITERATIONS):
         kwargs = {
             "model": MODEL,
             "max_tokens": MAX_TOKENS,
@@ -394,8 +415,15 @@ async def think(client: anthropic.AsyncAnthropic, tool_map: dict, anthropic_tool
             elif block.type == "tool_use":
                 tool_uses.append(block)
 
+        if response.stop_reason == "max_tokens":
+            log_file_only("WARNING: Response truncated by max_tokens limit")
+
         if response.stop_reason != "tool_use" or not tool_uses:
-            return "\n".join(text_parts)
+            thought = "\n".join(text_parts)
+            if not thought.strip():
+                log_file_only("WARNING: Empty thought generated, skipping")
+                return "[empty thought]"
+            return thought
 
         messages.append({"role": "assistant", "content": response.content})
 
@@ -409,6 +437,9 @@ async def think(client: anthropic.AsyncAnthropic, tool_map: dict, anthropic_tool
             })
 
         messages.append({"role": "user", "content": tool_results})
+
+    log_file_only(f"WARNING: Tool loop hit {MAX_TOOL_ITERATIONS} iteration limit")
+    return "\n".join(text_parts) if text_parts else "[thought exceeded tool iteration limit]"
 
 
 async def seed_memories(tool_map: dict) -> None:
@@ -462,7 +493,7 @@ async def main():
 
     client = anthropic.AsyncAnthropic(base_url=ANTHROPIC_BASE_URL)
 
-    config = await load_mcp_config(IDENTITY)
+    config = load_mcp_config(IDENTITY)
     tool_map, anthropic_tools, active_contexts = await connect_mcp_servers(config)
 
     tool_names = [t["name"] for t in anthropic_tools]
