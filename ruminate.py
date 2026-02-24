@@ -81,7 +81,8 @@ def send_to_discord(thought: str, identity: str, thought_num: int) -> None:
         log_file_only(f"Discord webhook error: {e}")
 
 # === Logging Setup ===
-log_dir = Path("/app/logs")
+APP_DIR = Path(__file__).resolve().parent
+log_dir = APP_DIR / "logs"
 log_dir.mkdir(exist_ok=True)
 
 log_file = log_dir / f"thoughts_{datetime.now().strftime('%Y%m%d_%H%M%S')}.log"
@@ -158,7 +159,7 @@ def _load_personality() -> str:
     # Priority 3: Named personality in personalities directory
     personality_name = os.environ.get("PERSONALITY_NAME")
     if personality_name:
-        path = Path(f"/app/personalities/{personality_name}.txt")
+        path = APP_DIR / "personalities" / f"{personality_name}.txt"
         if path.exists():
             log_file_only(f"Loading personality: {personality_name}")
             return path.read_text(encoding="utf-8").strip()
@@ -209,7 +210,7 @@ def _load_prompt() -> str:
         return prompt_env.strip()
 
     # Priority 3: Default location
-    default_path = Path("/app/prompt.txt")
+    default_path = APP_DIR / "prompt.txt"
     if default_path.exists():
         return default_path.read_text(encoding="utf-8").strip()
 
@@ -237,10 +238,7 @@ MAX_TOOL_ITERATIONS = 20
 
 def load_mcp_config(identity: str) -> dict:
     """Load MCP server config, interpolating env vars."""
-    config_path = os.environ.get("MCP_SERVERS_FILE", "/app/mcp_servers.json")
-    if not Path(config_path).exists():
-        config_path = "mcp_servers.json"
-
+    config_path = os.environ.get("MCP_SERVERS_FILE", str(APP_DIR / "mcp_servers.json"))
     if not Path(config_path).exists():
         raise FileNotFoundError(
             f"MCP server config not found at '{config_path}'. "
@@ -448,9 +446,7 @@ async def seed_memories(tool_map: dict) -> None:
         log_file_only("No add_memory tool available, skipping seed")
         return
 
-    seeds_file = Path("/app/seeds.txt")
-    if not seeds_file.exists():
-        seeds_file = Path("seeds.txt")
+    seeds_file = APP_DIR / "seeds.txt"
 
     if not seeds_file.exists():
         log_file_only("No seeds.txt found, starting fresh")
