@@ -109,6 +109,7 @@ logger.addHandler(console_handler)
 logging.getLogger("httpx").setLevel(logging.WARNING)
 logging.getLogger("anthropic").setLevel(logging.WARNING)
 logging.getLogger("mcp").setLevel(logging.WARNING)
+logging.getLogger("smithery").setLevel(logging.ERROR)
 
 
 def log_file_only(msg: str):
