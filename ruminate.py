@@ -408,18 +408,36 @@ async def think(client: anthropic.AsyncAnthropic, tool_map: dict, anthropic_tool
     tool_names = [t["name"] for t in anthropic_tools]
     system, messages = build_context(thought_history, tool_names, thought_count)
 
+    # Mark tools for prompt caching (cache_control on last tool)
+    cached_tools = None
+    if anthropic_tools:
+        cached_tools = [*anthropic_tools]
+        cached_tools[-1] = {**cached_tools[-1], "cache_control": {"type": "ephemeral"}}
+
+    # System prompt as cacheable content block
+    cached_system = [{"type": "text", "text": system, "cache_control": {"type": "ephemeral"}}]
+
     for iteration in range(MAX_TOOL_ITERATIONS):
         kwargs = {
             "model": MODEL,
             "max_tokens": MAX_TOKENS,
-            "system": system,
+            "system": cached_system,
             "messages": messages,
         }
-        if anthropic_tools:
-            kwargs["tools"] = anthropic_tools
+        if cached_tools:
+            kwargs["tools"] = cached_tools
 
-        async with client.messages.stream(**kwargs) as stream:
-            response = await stream.get_final_message()
+        try:
+            async with client.messages.stream(**kwargs) as stream:
+                response = await stream.get_final_message()
+        except anthropic.BadRequestError as e:
+            if "prompt is too long" in str(e) and len(messages) > 2:
+                # Trim oldest history and retry
+                log_file_only(f"WARNING: Prompt too long, trimming history ({len(messages)} messages)")
+                # Keep the first message (initial prompt) and trim from the middle
+                messages = [messages[0]] + messages[-(len(messages) // 2):]
+                continue
+            raise
 
         text_parts = []
         tool_uses = []
