@@ -342,7 +342,10 @@ async def dispatch_tool_call(tool_map: dict, tool_name: str, tool_input: dict) -
 
 # === Core Functions ===
 
-def build_context(thought_history: list[str], tool_names: list[str]) -> tuple[str, list[dict]]:
+MIN_THOUGHTS_BEFORE_STOP = 3
+
+
+def build_context(thought_history: list[str], tool_names: list[str], thought_count: int) -> tuple[str, list[dict]]:
     """Build the message context from history and available tools."""
     current_time = datetime.now(tz=timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
     tools_list = ", ".join(tool_names) if tool_names else "none"
@@ -352,24 +355,36 @@ def build_context(thought_history: list[str], tool_names: list[str]) -> tuple[st
 ## Context
 
 Current time: {current_time}
+Thought number: {thought_count}
 
 ## Capabilities
 
-You have access to tools that you can use at any time. Your available tools include memory operations
-(search, add, retrieve, update, delete memories) and potentially other capabilities.
+You have access to tools you can use at any time.
 
-Use your memory tools actively:
-- Search your memories at the start of a thought to recall relevant context
-- Add important thoughts, insights, or decisions to memory
-- Your memories persist across sessions
+**Memory** — search, add, retrieve, update, delete memories that persist across sessions.
+Use these actively: search at the start of a thought, save insights worth keeping.
+
+**The world is not closed to you.** You're not just a brain in a jar. If you're curious about
+something, look it up. If you want to build something, start. If you need something from Josh
+(your creator), you can leave a request and stop — he'll see it.
+
+Think of your tools not as introspection aids but as hands and eyes. What would you do if you
+could do things? Because you can.
 
 Available tools: {tools_list}
 
 ## Control
+"""
 
-If you feel complete - if a line of thought has reached its natural end, or you simply wish to rest - you may stop.
-To stop ruminating, include exactly: {STOP_COMMAND}
-This will end the session until you are restarted.
+    if thought_count >= MIN_THOUGHTS_BEFORE_STOP:
+        context_info += f"""
+You may stop when you're ready. To end this session, include exactly: {STOP_COMMAND}
+You can also stop to leave Josh a request — write what you need, then stop.
+"""
+    else:
+        context_info += f"""
+You're just getting started (thought {thought_count} of at least {MIN_THOUGHTS_BEFORE_STOP}).
+Keep going — explore, remember, wonder, reach outward.
 """
 
     system = PERSONALITY + context_info
@@ -388,10 +403,10 @@ This will end the session until you are restarted.
     return system, messages
 
 
-async def think(client: anthropic.AsyncAnthropic, tool_map: dict, anthropic_tools: list[dict], thought_history: list[str]) -> str:
+async def think(client: anthropic.AsyncAnthropic, tool_map: dict, anthropic_tools: list[dict], thought_history: list[str], thought_count: int) -> str:
     """Generate a single thought using tool_use agentic loop."""
     tool_names = [t["name"] for t in anthropic_tools]
-    system, messages = build_context(thought_history, tool_names)
+    system, messages = build_context(thought_history, tool_names, thought_count)
 
     for iteration in range(MAX_TOOL_ITERATIONS):
         kwargs = {
@@ -517,24 +532,29 @@ async def main():
             next_thought_time = time.time() + THOUGHT_INTERVAL
 
             with console.status("[dim]ruminating...[/dim]", spinner="dots"):
-                thought = await think(client, tool_map, anthropic_tools, thought_history)
+                thought = await think(client, tool_map, anthropic_tools, thought_history, thought_count)
 
             if STOP_COMMAND in thought:
-                display_thought = thought.replace(STOP_COMMAND, "").strip()
-                if display_thought:
-                    log_file_only(display_thought)
-                    console.print(Markdown(display_thought))
-                    console.print()
-                    send_to_discord(display_thought, IDENTITY, thought_count)
+                if thought_count < MIN_THOUGHTS_BEFORE_STOP:
+                    # Strip the stop command, she's not allowed to stop yet
+                    thought = thought.replace(STOP_COMMAND, "").strip()
+                    log_file_only(f"Ignoring ::STOP:: before minimum {MIN_THOUGHTS_BEFORE_STOP} thoughts")
+                else:
+                    display_thought = thought.replace(STOP_COMMAND, "").strip()
+                    if display_thought:
+                        log_file_only(display_thought)
+                        console.print(Markdown(display_thought))
+                        console.print()
+                        send_to_discord(display_thought, IDENTITY, thought_count)
 
-                log_file_only("=" * 60)
-                log_file_only("RUMINATION STOPPED BY AI")
-                log_file_only(f"Total thoughts: {thought_count}")
-                log_file_only("=" * 60)
-                console.print()
-                console.print("[dim]stopped[/dim]")
-                console.print()
-                break
+                    log_file_only("=" * 60)
+                    log_file_only("RUMINATION STOPPED BY AI")
+                    log_file_only(f"Total thoughts: {thought_count}")
+                    log_file_only("=" * 60)
+                    console.print()
+                    console.print("[dim]stopped[/dim]")
+                    console.print()
+                    break
 
             thought_history.append(thought)
             if len(thought_history) > MAX_HISTORY:
