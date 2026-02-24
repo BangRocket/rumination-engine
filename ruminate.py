@@ -3,6 +3,8 @@
 Rumination Engine - An input-less LLM thought experiment
 """
 
+import asyncio
+import json
 import os
 import re
 import time
@@ -18,45 +20,13 @@ from rich.markdown import Markdown
 from rich.panel import Panel
 from rich.text import Text
 from rich.status import Status
+from mcp import ClientSession, StdioServerParameters
+from mcp.client.stdio import stdio_client
 
 console = Console()
 
 # Load environment variables from .env file
 load_dotenv()
-from mem0 import Memory
-import mem0.memory.graph_memory as graph_memory_module
-
-
-def _sanitize_neo4j_identifier(name: str) -> str:
-    """Sanitize a string to be a valid Neo4j relationship type or label.
-
-    Neo4j identifiers can contain letters, numbers, and underscores.
-    Hyphens and other special chars are invalid without backticks.
-    """
-    if not name:
-        return name
-    # Replace hyphens and spaces with underscores
-    sanitized = re.sub(r'[-\s]+', '_', name)
-    # Remove any other non-alphanumeric chars (except underscore)
-    sanitized = re.sub(r'[^\w]', '', sanitized)
-    # Ensure it doesn't start with a number
-    if sanitized and sanitized[0].isdigit():
-        sanitized = '_' + sanitized
-    return sanitized or 'RELATED_TO'
-
-
-# Monkey-patch mem0's graph memory to sanitize relationship types
-_original_add_entities = graph_memory_module.MemoryGraph._add_entities
-
-def _patched_add_entities(self, to_be_added, filters, entity_type_map):
-    """Patched version that sanitizes relationship types before Neo4j queries."""
-    # Sanitize relationship types in the entities to be added
-    for item in to_be_added:
-        if 'relation' in item:
-            item['relation'] = _sanitize_neo4j_identifier(item['relation'])
-    return _original_add_entities(self, to_be_added, filters, entity_type_map)
-
-graph_memory_module.MemoryGraph._add_entities = _patched_add_entities
 
 # === Configuration ===
 THOUGHT_INTERVAL = int(os.environ.get("THOUGHT_INTERVAL", "60"))
@@ -255,104 +225,110 @@ IDENTITY = _extract_identity(PERSONALITY)
 INITIAL_PROMPT = _load_prompt()
 log_file_only(f"Identity: {IDENTITY}")
 
-# === Mem0 Configuration ===
-mem0_config = {
-    "graph_store": {
-        "provider": "neo4j",
-        "config": {
-            "url": f"bolt://{os.environ.get('NEO4J_HOST', 'neo4j')}:7687",
-            "username": "neo4j",
-            "password": "ruminate123",
-        }
-    },
-    "vector_store": {
-        "provider": "pgvector",
-        "config": {
-            "host": os.environ.get("POSTGRES_HOST", "postgres"),
-            "port": 5432,
-            "user": "ruminate",
-            "password": "ruminate",
-            "dbname": "mem0",
-        }
-    },
-    "llm": {
-        "provider": "openai",
-        "config": {
-            "model": "gpt-4o-mini",
-            "api_key": os.environ.get("OPENAI_API_KEY"),
-        }
-    },
-    "embedder": {
-        "provider": "openai",
-        "config": {
-            "api_key": os.environ.get("OPENAI_API_KEY"),
-        }
-    }
-}
-
-
 # Maximum number of previous thoughts to include in context
 MAX_HISTORY = int(os.environ.get("MAX_HISTORY", "10"))
 
 # Stop command - if the AI outputs this, the loop terminates
 STOP_COMMAND = "::STOP::"
 
-# Command execution pattern
-CMD_PATTERN = re.compile(r'::CMD::(.*?)::END::', re.DOTALL)
 
-# Allowed commands (security whitelist)
-ALLOWED_COMMANDS = {'curl', 'wget', 'ls', 'cat', 'head', 'tail', 'wc', 'date', 'echo', 'mkdir', 'touch', 'rm', 'mv', 'cp', 'find', 'grep', 'jq'}
+# === MCP Client Functions ===
+
+async def load_mcp_config(identity: str) -> dict:
+    """Load MCP server config, interpolating env vars."""
+    config_path = os.environ.get("MCP_SERVERS_FILE", "/app/mcp_servers.json")
+    if not Path(config_path).exists():
+        config_path = "mcp_servers.json"
+
+    with open(config_path) as f:
+        raw = f.read()
+
+    env = {**os.environ, "IDENTITY": identity}
+
+    def replace_var(match):
+        var_name = match.group(1)
+        return env.get(var_name, "")
+
+    interpolated = re.sub(r'\$\{(\w+)\}', replace_var, raw)
+    return json.loads(interpolated)
 
 
-def execute_command(cmd: str) -> str:
-    """Execute a shell command safely and return output."""
-    import subprocess
+async def connect_mcp_servers(config: dict) -> tuple[dict, list[dict], list]:
+    """Connect to all configured MCP servers, discover tools.
 
-    cmd = cmd.strip()
-    if not cmd:
-        return "[error: empty command]"
+    Returns:
+        (tool_map, anthropic_tools, active_contexts)
+        - tool_map: {tool_name: (session, server_name)}
+        - anthropic_tools: list of tool defs in Anthropic format
+        - active_contexts: context managers to keep alive
+    """
+    servers = config.get("mcpServers", {})
+    tool_map = {}
+    anthropic_tools = []
+    active_contexts = []
 
-    # Extract base command for whitelist check
-    base_cmd = cmd.split()[0] if cmd.split() else ""
+    for server_name, server_config in servers.items():
+        params = StdioServerParameters(
+            command=server_config["command"],
+            args=server_config.get("args", []),
+            env=server_config.get("env"),
+        )
 
-    if base_cmd not in ALLOWED_COMMANDS:
-        return f"[error: command '{base_cmd}' not allowed. Allowed: {', '.join(sorted(ALLOWED_COMMANDS))}]"
+        read_write_ctx = stdio_client(params)
+        read, write = await read_write_ctx.__aenter__()
+        active_contexts.append(read_write_ctx)
+
+        session_ctx = ClientSession(read, write)
+        session = await session_ctx.__aenter__()
+        active_contexts.append(session_ctx)
+
+        await session.initialize()
+
+        tools_result = await session.list_tools()
+        for tool in tools_result.tools:
+            tool_map[tool.name] = (session, server_name)
+            anthropic_tools.append({
+                "name": tool.name,
+                "description": tool.description or "",
+                "input_schema": tool.inputSchema,
+            })
+
+        log_file_only(f"MCP server '{server_name}': {len(tools_result.tools)} tools")
+
+    return tool_map, anthropic_tools, active_contexts
+
+
+async def dispatch_tool_call(tool_map: dict, tool_name: str, tool_input: dict) -> str:
+    """Dispatch a tool call to the correct MCP server."""
+    if tool_name not in tool_map:
+        return json.dumps({"error": f"Unknown tool: {tool_name}"})
+
+    session, server_name = tool_map[tool_name]
+    log_file_only(f"Calling tool '{tool_name}' on server '{server_name}'")
 
     try:
-        result = subprocess.run(
-            cmd,
-            shell=True,
-            capture_output=True,
-            text=True,
-            timeout=30,
-            cwd="/data"
-        )
-        output = result.stdout
-        if result.stderr:
-            output += f"\n[stderr: {result.stderr}]"
-        if result.returncode != 0:
-            output += f"\n[exit code: {result.returncode}]"
-        return output.strip() or "[no output]"
-    except subprocess.TimeoutExpired:
-        return "[error: command timed out (30s limit)]"
+        result = await session.call_tool(tool_name, tool_input)
+        parts = []
+        for content in result.content:
+            if hasattr(content, 'text'):
+                parts.append(content.text)
+            else:
+                parts.append(str(content))
+        output = "\n".join(parts)
+        log_file_only(f"Tool '{tool_name}' result: {output[:500]}")
+        return output
     except Exception as e:
-        return f"[error: {e}]"
+        error_msg = f"Tool '{tool_name}' error: {e}"
+        log_file_only(error_msg)
+        return json.dumps({"error": error_msg})
 
 
-def build_context(memory: Memory, thought_history: list[str]) -> tuple[str, list[dict]]:
-    """Build the message context from memories, history, and original prompt."""
+# === Core Functions ===
 
-    # Retrieve relevant memories
-    memories = memory.get_all(user_id=IDENTITY, limit=20)
-
-    memory_text = ""
-    if memories and memories.get("results"):
-        memory_text = "\n\n## Your Memories\n"
-        for mem in memories["results"]:
-            memory_text += f"- {mem['memory']}\n"
-
-    # Add current time and stop command information
+def build_context(thought_history: list[str], tool_names: list[str]) -> tuple[str, list[dict]]:
+    """Build the message context from history and available tools."""
     current_time = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S UTC")
+    tools_list = ", ".join(tool_names) if tool_names else "none"
 
     context_info = f"""
 
@@ -362,33 +338,25 @@ Current time: {current_time}
 
 ## Capabilities
 
-You have a persistent workspace at /data where you can create, read, and organize files.
-This space persists across sessions - anything you write there will remain.
+You have access to tools that you can use at any time. Your available tools include memory operations
+(search, add, retrieve, update, delete memories) and potentially other capabilities.
 
-You can execute commands using the syntax:
-::CMD::your command here::END::
+Use your memory tools actively:
+- Search your memories at the start of a thought to recall relevant context
+- Add important thoughts, insights, or decisions to memory
+- Your memories persist across sessions
 
-Available commands: {', '.join(sorted(ALLOWED_COMMANDS))}
-
-Examples:
-- ::CMD::curl -s https://example.com::END:: (fetch a webpage)
-- ::CMD::echo "a thought" >> /data/notes.txt::END:: (append to a file)
-- ::CMD::cat /data/notes.txt::END:: (read a file)
-- ::CMD::ls -la /data::END:: (list your files)
-- ::CMD::date::END:: (get current system time)
-
-Commands run in /data with a 30-second timeout. Output will be provided before your next thought.
+Available tools: {tools_list}
 
 ## Control
 
 If you feel complete - if a line of thought has reached its natural end, or you simply wish to rest - you may stop.
-To stop ruminating, output exactly: {STOP_COMMAND}
+To stop ruminating, include exactly: {STOP_COMMAND}
 This will end the session until you are restarted.
 """
 
-    system = PERSONALITY + memory_text + context_info
+    system = PERSONALITY + context_info
 
-    # Always start with the original prompt
     messages = [
         {
             "role": "user",
@@ -396,81 +364,89 @@ This will end the session until you are restarted.
         }
     ]
 
-    # Add previous thoughts as conversation history
     for thought in thought_history:
-        messages.append({
-            "role": "assistant",
-            "content": thought
-        })
-        messages.append({
-            "role": "user",
-            "content": "[Continue]"
-        })
+        messages.append({"role": "assistant", "content": thought})
+        messages.append({"role": "user", "content": "[Continue]"})
 
     return system, messages
 
 
-def think(client: anthropic.Anthropic, memory: Memory, thought_history: list[str]) -> str:
-    """Generate a single thought."""
+async def think(client: anthropic.AsyncAnthropic, tool_map: dict, anthropic_tools: list[dict], thought_history: list[str]) -> str:
+    """Generate a single thought using tool_use agentic loop."""
+    tool_names = [t["name"] for t in anthropic_tools]
+    system, messages = build_context(thought_history, tool_names)
 
-    system, messages = build_context(memory, thought_history)
+    while True:
+        kwargs = {
+            "model": MODEL,
+            "max_tokens": MAX_TOKENS,
+            "system": system,
+            "messages": messages,
+        }
+        if anthropic_tools:
+            kwargs["tools"] = anthropic_tools
 
-    # Use streaming to handle long requests
-    thought_parts = []
-    with client.messages.stream(
-        model=MODEL,
-        max_tokens=MAX_TOKENS,
-        system=system,
-        messages=messages
-    ) as stream:
-        for text in stream.text_stream:
-            thought_parts.append(text)
+        response = await client.messages.create(**kwargs)
 
-    thought = "".join(thought_parts)
+        text_parts = []
+        tool_uses = []
+        for block in response.content:
+            if block.type == "text":
+                text_parts.append(block.text)
+            elif block.type == "tool_use":
+                tool_uses.append(block)
 
-    # Store in memory (let mem0 decide what's worth keeping)
-    # Graph store can fail on edge cases (hyphens in relationship names, etc.)
-    try:
-        memory.add(thought, user_id=IDENTITY)
-    except Exception as e:
-        log_file_only(f"Memory storage error (continuing): {e}")
+        if response.stop_reason != "tool_use" or not tool_uses:
+            return "\n".join(text_parts)
 
-    return thought
+        messages.append({"role": "assistant", "content": response.content})
+
+        tool_results = []
+        for tool_use in tool_uses:
+            result_text = await dispatch_tool_call(tool_map, tool_use.name, tool_use.input)
+            tool_results.append({
+                "type": "tool_result",
+                "tool_use_id": tool_use.id,
+                "content": result_text,
+            })
+
+        messages.append({"role": "user", "content": tool_results})
 
 
-def seed_memories(memory: Memory) -> None:
-    """Seed initial memories if none exist for this identity."""
-    existing = memory.get_all(user_id=IDENTITY, limit=1)
-    if existing and existing.get("results"):
-        log_file_only(f"Found existing memories for {IDENTITY}, skipping seed")
+async def seed_memories(tool_map: dict) -> None:
+    """Seed initial memories via MCP add_memory tool if seeds.txt exists."""
+    if "add_memory" not in tool_map:
+        log_file_only("No add_memory tool available, skipping seed")
         return
 
-    # Check for seeds file
     seeds_file = Path("/app/seeds.txt")
     if not seeds_file.exists():
-        seeds_file = Path("seeds.txt")  # Local dev fallback
+        seeds_file = Path("seeds.txt")
 
-    if seeds_file.exists():
-        log_file_only(f"Seeding memories from {seeds_file}")
-        seeds = seeds_file.read_text(encoding="utf-8").strip().split("\n---\n")
-        for seed in seeds:
-            seed = seed.strip()
-            if seed:
-                try:
-                    memory.add(seed, user_id=IDENTITY)
-                    log_file_only(f"Seeded: {seed[:60]}...")
-                except Exception as e:
-                    log_file_only(f"Seed error: {e}")
-        console.print(f"[dim]seeded {len(seeds)} memories[/dim]")
-        console.print()
-    else:
+    if not seeds_file.exists():
         log_file_only("No seeds.txt found, starting fresh")
+        return
+
+    log_file_only(f"Seeding memories from {seeds_file}")
+    seeds = seeds_file.read_text(encoding="utf-8").strip().split("\n---\n")
+    seeded = 0
+    for seed in seeds:
+        seed = seed.strip()
+        if seed:
+            try:
+                await dispatch_tool_call(tool_map, "add_memory", {"content": seed})
+                seeded += 1
+                log_file_only(f"Seeded: {seed[:60]}...")
+            except Exception as e:
+                log_file_only(f"Seed error: {e}")
+
+    if seeded:
+        console.print(f"[dim]seeded {seeded} memories[/dim]")
+        console.print()
 
 
-def main():
+async def main():
     """Main rumination loop."""
-
-    # File-only startup logging
     log_file_only("=" * 60)
     log_file_only("RUMINATION ENGINE STARTING")
     log_file_only(f"Model: {MODEL}")
@@ -478,7 +454,6 @@ def main():
     log_file_only(f"Identity: {IDENTITY}")
     log_file_only("=" * 60)
 
-    # Rich console header
     console.print()
     console.print(Panel(
         Text(IDENTITY, style="italic"),
@@ -487,12 +462,18 @@ def main():
     ))
     console.print()
 
-    # Initialize clients
-    client = anthropic.Anthropic(base_url=ANTHROPIC_BASE_URL)
-    memory = Memory.from_config(mem0_config)
+    client = anthropic.AsyncAnthropic(base_url=ANTHROPIC_BASE_URL)
 
-    # Seed initial memories if starting fresh
-    seed_memories(memory)
+    config = await load_mcp_config(IDENTITY)
+    tool_map, anthropic_tools, active_contexts = await connect_mcp_servers(config)
+
+    tool_names = [t["name"] for t in anthropic_tools]
+    console.print(f"[dim]connected to MCP servers, {len(tool_names)} tools available[/dim]")
+    if tool_names:
+        console.print(f"[dim]tools: {', '.join(tool_names)}[/dim]")
+    console.print()
+
+    await seed_memories(tool_map)
 
     thought_history: list[str] = []
     thought_count = 0
@@ -501,24 +482,18 @@ def main():
         next_thought_time = time.time()
 
         while True:
-            # Wait until next scheduled time (or continue immediately if past due)
             wait_time = next_thought_time - time.time()
             if wait_time > 0:
-                time.sleep(wait_time)
+                await asyncio.sleep(wait_time)
 
             thought_count += 1
             log_file_only(f"--- Thought #{thought_count} ---")
-
-            # Schedule next thought from now (so interval is between starts, not ends)
             next_thought_time = time.time() + THOUGHT_INTERVAL
 
-            # Show spinner while thinking
             with console.status("[dim]ruminating...[/dim]", spinner="dots"):
-                thought = think(client, memory, thought_history)
+                thought = await think(client, tool_map, anthropic_tools, thought_history)
 
-            # Check for stop command
             if STOP_COMMAND in thought:
-                # Remove the stop command from output
                 display_thought = thought.replace(STOP_COMMAND, "").strip()
                 if display_thought:
                     log_file_only(display_thought)
@@ -535,38 +510,13 @@ def main():
                 console.print()
                 break
 
-            # Check for and execute commands
-            commands = CMD_PATTERN.findall(thought)
-            cmd_results = []
-            if commands:
-                with console.status("[dim]executing commands...[/dim]", spinner="dots"):
-                    for cmd in commands:
-                        cmd = cmd.strip()
-                        log_file_only(f"Executing command: {cmd}")
-                        result = execute_command(cmd)
-                        log_file_only(f"Command output: {result[:500]}...")
-                        cmd_results.append(f"$ {cmd}\n{result}")
-                console.print(f"[dim]executed {len(commands)} command(s)[/dim]")
-                console.print()
-
-            # Add to history (keep only last MAX_HISTORY thoughts)
             thought_history.append(thought)
-
-            # If commands were executed, add results as a system message
-            if cmd_results:
-                cmd_output = "\n\n".join(cmd_results)
-                thought_history.append(f"[Command Results]\n{cmd_output}")
             if len(thought_history) > MAX_HISTORY:
                 thought_history = thought_history[-MAX_HISTORY:]
 
-            # Log to file
             log_file_only(thought)
-
-            # Rich console output
             console.print(Markdown(thought))
             console.print()
-
-            # Send to Discord if configured
             send_to_discord(thought, IDENTITY, thought_count)
 
     except KeyboardInterrupt:
@@ -576,7 +526,13 @@ def main():
         console.print()
         console.print(f"[dim]{thought_count} thoughts[/dim]")
         console.print()
+    finally:
+        for ctx in reversed(active_contexts):
+            try:
+                await ctx.__aexit__(None, None, None)
+            except Exception:
+                pass
 
 
 if __name__ == "__main__":
-    main()
+    asyncio.run(main())
