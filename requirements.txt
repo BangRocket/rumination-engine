@@ -4,9 +4,5 @@ python-dotenv
 rich
 requests
 
-# Memory (mem0 + stores)
-mem0ai[graph]>=0.1.45
-
-# Database drivers
-psycopg2-binary
-neo4j>=5.0.0
+# MCP client
+mcp>=1.0.0
