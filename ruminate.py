@@ -344,7 +344,7 @@ async def dispatch_tool_call(tool_map: dict, tool_name: str, tool_input: dict) -
 
 def build_context(thought_history: list[str], tool_names: list[str]) -> tuple[str, list[dict]]:
     """Build the message context from history and available tools."""
-    current_time = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S UTC")
+    current_time = datetime.now(tz=datetime.timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
     tools_list = ", ".join(tool_names) if tool_names else "none"
 
     context_info = f"""
@@ -403,7 +403,8 @@ async def think(client: anthropic.AsyncAnthropic, tool_map: dict, anthropic_tool
         if anthropic_tools:
             kwargs["tools"] = anthropic_tools
 
-        response = await client.messages.create(**kwargs)
+        async with client.messages.stream(**kwargs) as stream:
+            response = await stream.get_final_message()
 
         text_parts = []
         tool_uses = []
