@@ -460,7 +460,7 @@ async def seed_memories(tool_map: dict) -> None:
         seed = seed.strip()
         if seed:
             try:
-                await dispatch_tool_call(tool_map, "add_memory", {"content": seed})
+                await dispatch_tool_call(tool_map, "add_memory", {"text": seed})
                 seeded += 1
                 log_file_only(f"Seeded: {seed[:60]}...")
             except Exception as e:
