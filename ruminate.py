@@ -9,7 +9,7 @@ import os
 import re
 import time
 import logging
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 
 from dotenv import load_dotenv
@@ -344,7 +344,7 @@ async def dispatch_tool_call(tool_map: dict, tool_name: str, tool_input: dict) -
 
 def build_context(thought_history: list[str], tool_names: list[str]) -> tuple[str, list[dict]]:
     """Build the message context from history and available tools."""
-    current_time = datetime.now(tz=datetime.timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
+    current_time = datetime.now(tz=timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
     tools_list = ", ".join(tool_names) if tool_names else "none"
 
     context_info = f"""
