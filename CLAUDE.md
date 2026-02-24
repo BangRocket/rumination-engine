@@ -8,32 +8,31 @@ Rumination Engine is an input-less LLM thought experiment. It runs a continuous 
 
 ## Architecture
 
-**Single-file Python application** (`ruminate.py`) with three external services:
+**Single-file Python application** (`ruminate.py`) with MCP server integration:
 
 ```
-ruminate.py
+ruminate.py (MCP client + Anthropic tool_use)
     │
-    ├── Anthropic API (Claude) → generates thoughts
+    ├── Anthropic API (Claude) → generates thoughts via tool_use
     │
-    └── mem0 Memory System
-            ├── PostgreSQL/pgvector → vector store for semantic memory
-            └── Neo4j → graph store for memory relationships
+    └── MCP Servers (configurable, stdio transport)
+            ├── mem0-mcp-server → memory (add, search, get, delete)
+            └── [any other configured MCP servers]
 ```
 
 The main loop:
-1. Retrieves memories from mem0 (up to 20)
-2. Builds context with system prompt + memories + thought history + original prompt
-3. Calls Claude (streaming) to generate next thought
-4. Executes any `::CMD::command::END::` commands found in the output
-5. Stores new thought in mem0
-6. Waits `THOUGHT_INTERVAL` seconds, repeats
-
-The AI can output `::STOP::` to terminate the session.
+1. Connects to configured MCP servers, discovers available tools
+2. Builds context with system prompt + thought history + tool descriptions
+3. Calls Claude with tool_use enabled — Claude can call any MCP tool
+4. Handles tool calls in an agentic loop until Claude produces final text
+5. That text is the "thought" — logged, displayed, sent to Discord
+6. The AI can output `::STOP::` to terminate the session
+7. Waits `THOUGHT_INTERVAL` seconds, repeats
 
 ## Running the Application
 
 ```bash
-# Start all services (requires ANTHROPIC_API_KEY and OPENAI_API_KEY env vars)
+# Start (requires ANTHROPIC_API_KEY and MEM0_API_KEY env vars)
 docker compose up --build
 
 # View logs
@@ -41,9 +40,6 @@ tail -f logs/thoughts_*.log
 
 # Stop
 docker compose down
-
-# Reset all data
-docker compose down -v
 ```
 
 ## Configuration
@@ -51,6 +47,8 @@ docker compose down -v
 Environment variables (see `.env.example`):
 - `ANTHROPIC_MODEL`: Claude model to use
 - `ANTHROPIC_BASE_URL`: Custom endpoint (optional)
+- `MEM0_API_KEY`: mem0 platform API key
+- `MCP_SERVERS_FILE`: path to MCP server config (default: /app/mcp_servers.json)
 - `THOUGHT_INTERVAL`: seconds between thoughts (default: 60)
 - `MAX_TOKENS`: max response length (default: 1024)
 - `MAX_HISTORY`: number of previous thoughts in context (default: 10)
@@ -58,17 +56,15 @@ Environment variables (see `.env.example`):
 
 ## AI Capabilities
 
-The ruminating AI has access to:
+The ruminating AI has access to tools via MCP servers:
 
-**Persistent Storage** (`/data` volume):
-- Files persist across container restarts
-- Docker named volume `ruminate_data`
+**Memory** (via mem0-mcp-server):
+- `add_memory`: Save thoughts and insights to persistent memory
+- `search_memories`: Semantic search across memories
+- `get_memories`: List memories with filters
+- `update_memory`, `delete_memory`: Manage individual memories
 
-**Command Execution** (via `::CMD::command::END::` in output):
-- Allowed: `cat`, `cp`, `curl`, `date`, `echo`, `find`, `grep`, `head`, `jq`, `ls`, `mkdir`, `mv`, `rm`, `tail`, `touch`, `wc`, `wget`
-- 30-second timeout per command
-- Commands run in `/data` working directory
-- Results appear in the AI's context on next iteration
+**Extensible**: Additional MCP servers can be configured in `mcp_servers.json`
 
 ## Personality System
 
@@ -87,8 +83,8 @@ The identity (for mem0 memory isolation) is extracted from the personality's fir
 
 ## Dependencies
 
-- `anthropic`: Claude API client
-- `mem0ai`: Memory system with vector + graph stores
-- `psycopg2-binary`: PostgreSQL driver for pgvector
-- `neo4j`: Neo4j driver for graph store
-- OpenAI API key required for mem0's default embedder
+- `anthropic`: Claude API client (AsyncAnthropic)
+- `mcp`: Model Context Protocol Python SDK
+- `rich`: Terminal formatting
+- `requests`: HTTP client (Discord webhooks)
+- `python-dotenv`: Environment variable loading

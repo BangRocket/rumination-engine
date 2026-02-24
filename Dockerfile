@@ -2,14 +2,10 @@ FROM python:3.12-slim
 
 WORKDIR /app
 
-# Install system tools
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    curl \
-    wget \
-    jq \
-    && rm -rf /var/lib/apt/lists/*
+# Install uv (for uvx MCP server execution)
+RUN pip install --no-cache-dir uv
 
-# Install dependencies with resolver optimization
+# Install dependencies
 COPY requirements.txt .
 RUN pip install --no-cache-dir --upgrade pip && \
     pip install --no-cache-dir -r requirements.txt
@@ -18,6 +14,6 @@ RUN pip install --no-cache-dir --upgrade pip && \
 COPY ruminate.py .
 
 # Create directories
-RUN mkdir -p /app/logs /data
+RUN mkdir -p /app/logs
 
 CMD ["python", "-u", "ruminate.py"]
