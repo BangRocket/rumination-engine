@@ -7,6 +7,7 @@ Type=simple
 WorkingDirectory=/opt/rumination-engine
 ExecStart=/opt/rumination-engine/run.sh
 EnvironmentFile=/opt/rumination-engine/.env
+Environment=PATH=/home/heidornj/.local/bin:/usr/local/bin:/usr/bin:/bin
 Restart=on-failure
 RestartSec=10
 StandardOutput=journal
