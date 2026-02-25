@@ -5,15 +5,20 @@ services:
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY}
       ANTHROPIC_MODEL: ${ANTHROPIC_MODEL:-claude-sonnet-4-20250514}
       ANTHROPIC_BASE_URL: ${ANTHROPIC_BASE_URL:-}
+      LLM_PROVIDER: ${LLM_PROVIDER:-anthropic}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      OPENAI_BASE_URL: ${OPENAI_BASE_URL:-}
+      OPENAI_MODEL: ${OPENAI_MODEL:-glm-4.7}
       MEM0_API_KEY: ${MEM0_API_KEY}
       PERSONALITY_NAME: ${PERSONALITY_NAME:-default}
       THOUGHT_INTERVAL: ${THOUGHT_INTERVAL:-60}
       MAX_TOKENS: ${MAX_TOKENS:-1024}
-      MAX_HISTORY: ${MAX_HISTORY:-10}
+      MAX_HISTORY: ${MAX_HISTORY:-2}
       DISCORD_WEBHOOK_URL: ${DISCORD_WEBHOOK_URL:-}
     volumes:
       - ./logs:/app/logs
       - ./personalities:/app/personalities:ro
       - ./prompt.txt:/app/prompt.txt:ro
       - ./seeds.txt:/app/seeds.txt:ro
-      - ./mcp_servers.json:/app/mcp_servers.json:ro
+      - ./mcp_servers.json:/app/mcp_servers.json
+      - ./workspace:/workspace
