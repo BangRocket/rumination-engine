@@ -273,18 +273,51 @@ class OpenAIProvider:
             if openai_tools:
                 kwargs["tools"] = openai_tools
 
-            try:
-                async with self.client.chat.completions.stream(**kwargs) as stream:
-                    async for event in stream:
-                        if event.type == "content.delta":
-                            if event.delta:
-                                sys.stdout.write(event.delta)
-                                sys.stdout.flush()
-                    response = await stream.get_final_completion()
-            except Exception as e:
-                log(f"WARNING: OpenAI API error: {e}")
-                sys.stdout.write("\n")
-                return f"[thought interrupted: {e}]", tool_trace
+            response = None
+            streamed_text = ""
+            for attempt in range(3):
+                try:
+                    async with self.client.chat.completions.stream(**kwargs) as stream:
+                        async for event in stream:
+                            if event.type == "content.delta":
+                                if event.delta:
+                                    sys.stdout.write(event.delta)
+                                    sys.stdout.flush()
+                                    streamed_text += event.delta
+                        response = await stream.get_final_completion()
+                    break
+                except openai.BadRequestError as e:
+                    err_msg = str(e).lower()
+                    if ("context length" in err_msg or "too long" in err_msg) and history_end > 3:
+                        # Trim history (mirroring AnthropicProvider's overflow logic)
+                        # oai_messages[0] is system, [1:history_end+1] is history
+                        hist_start = 1  # after system message
+                        hist_end = hist_start + history_end
+                        history = oai_messages[hist_start:hist_end]
+                        tool_chain = oai_messages[hist_end:]
+                        pairs_to_remove = max(1, len(history) // 4)
+                        cut = pairs_to_remove * 2
+                        history = [history[0]] + history[1 + cut:]
+                        history_end = len(history)
+                        oai_messages = [oai_messages[0]] + history + tool_chain
+                        log(f"WARNING: Prompt too long, trimmed {pairs_to_remove} history pairs ({len(oai_messages)} messages remain)")
+                        break  # retry via outer loop since response is None
+                    raise
+                except (openai.APIConnectionError, openai.APITimeoutError) as e:
+                    log(f"WARNING: Transient API error (attempt {attempt + 1}/3): {e}")
+                    if attempt < 2:
+                        await asyncio.sleep(2 ** attempt)
+                        streamed_text = ""
+                        continue
+                    sys.stdout.write("\n")
+                    return f"[thought interrupted: {e}]", tool_trace
+                except Exception as e:
+                    log(f"WARNING: OpenAI API error: {e}")
+                    sys.stdout.write("\n")
+                    return f"[thought interrupted: {e}]", tool_trace
+
+            if response is None:
+                continue  # prompt was trimmed, retry
 
             choice = response.choices[0]
             message = choice.message
