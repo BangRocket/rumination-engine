@@ -17,7 +17,6 @@ from pathlib import Path
 from dotenv import load_dotenv
 import requests
 from rich.console import Console
-from rich.markdown import Markdown
 from rich.panel import Panel
 from rich.text import Text
 from mcp import ClientSession, StdioServerParameters
@@ -31,7 +30,6 @@ load_dotenv()
 
 # === Configuration ===
 THOUGHT_INTERVAL = int(os.environ.get("THOUGHT_INTERVAL", "60"))
-MAX_TOKENS = int(os.environ.get("MAX_TOKENS", "1024"))
 DISCORD_WEBHOOK_URL = os.environ.get("DISCORD_WEBHOOK_URL")  # Optional
 
 
