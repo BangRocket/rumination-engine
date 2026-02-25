@@ -8,6 +8,7 @@ import hashlib
 import json
 import os
 import re
+import sys
 import tempfile
 import time
 import logging
@@ -475,6 +476,50 @@ BUILTIN_TOOLS = [
             "required": ["command"],
         },
     },
+    {
+        "name": "update_source",
+        "description": (
+            "Update your own source code. Writes content to a file in your project "
+            "directory. Auto-commits before and after for rollback safety. "
+            "Python files are syntax-checked before writing. "
+            "Protected files (.env, .git/*, run.sh) cannot be modified."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "path": {
+                    "type": "string",
+                    "description": (
+                        "File path relative to project dir (e.g. 'ruminate.py', "
+                        "'providers.py', 'prompt.txt')"
+                    ),
+                },
+                "content": {
+                    "type": "string",
+                    "description": "The full file content to write",
+                },
+            },
+            "required": ["path", "content"],
+        },
+    },
+    {
+        "name": "restart_self",
+        "description": (
+            "Restart your own process to pick up code changes. "
+            "The current thought will end and a fresh Python process will start "
+            "with the updated code. Use after update_source to apply changes."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "reason": {
+                    "type": "string",
+                    "description": "Why you're restarting (logged for debugging)",
+                },
+            },
+            "required": ["reason"],
+        },
+    },
 ]
 
 BUILTIN_TOOL_NAMES = {t["name"] for t in BUILTIN_TOOLS}
@@ -541,12 +586,140 @@ async def _run_command(tool_input: dict) -> str:
     return output
 
 
+PROTECTED_PATHS = {".env", "run.sh"}
+PROTECTED_PREFIXES = (".git/",)
+RESTART_EXIT_CODE = 42
+
+
+def _is_protected_path(path: str) -> bool:
+    """Check if a path is protected from modification."""
+    if path in PROTECTED_PATHS:
+        return True
+    return any(path.startswith(prefix) for prefix in PROTECTED_PREFIXES)
+
+
+async def _update_source(tool_input: dict) -> str:
+    """Handle the update_source built-in tool."""
+    rel_path = tool_input.get("path", "")
+    content = tool_input.get("content", "")
+
+    if not rel_path:
+        return json.dumps({"error": "path is required"})
+
+    # Normalize and validate path
+    rel_path = os.path.normpath(rel_path)
+    if rel_path.startswith("..") or os.path.isabs(rel_path):
+        return json.dumps({"error": "Path must be relative and within project directory"})
+
+    if _is_protected_path(rel_path):
+        return json.dumps({"error": f"Cannot modify protected file: {rel_path}"})
+
+    abs_path = APP_DIR / rel_path
+
+    # Syntax check for Python files
+    if rel_path.endswith(".py"):
+        try:
+            compile(content, rel_path, "exec")
+        except SyntaxError as e:
+            return json.dumps({
+                "error": f"Syntax error in {rel_path}: {e.msg} (line {e.lineno})",
+            })
+
+    # Git: commit current state as backup
+    try:
+        if abs_path.exists():
+            proc = await asyncio.create_subprocess_exec(
+                "git", "add", rel_path,
+                cwd=str(APP_DIR),
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            await proc.communicate()
+            proc = await asyncio.create_subprocess_exec(
+                "git", "commit", "-m", f"pre-update backup: {rel_path}",
+                "--allow-empty",
+                cwd=str(APP_DIR),
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            await proc.communicate()
+    except Exception as e:
+        log_file_only(f"WARNING: Git backup failed for {rel_path}: {e}")
+
+    # Write the new content
+    try:
+        abs_path.parent.mkdir(parents=True, exist_ok=True)
+        abs_path.write_text(content, encoding="utf-8")
+    except Exception as e:
+        return json.dumps({"error": f"Failed to write {rel_path}: {e}"})
+
+    # Git: commit the update
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            "git", "add", rel_path,
+            cwd=str(APP_DIR),
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        await proc.communicate()
+        proc = await asyncio.create_subprocess_exec(
+            "git", "diff", "--cached", "--stat",
+            cwd=str(APP_DIR),
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        diff_out, _ = await proc.communicate()
+        diff_summary = diff_out.decode(errors="replace").strip()
+
+        proc = await asyncio.create_subprocess_exec(
+            "git", "commit", "-m", f"self-update: {rel_path}",
+            cwd=str(APP_DIR),
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        await proc.communicate()
+    except Exception as e:
+        log_file_only(f"WARNING: Git commit failed for {rel_path}: {e}")
+        diff_summary = "(git commit failed)"
+
+    log_file_only(f"Source updated: {rel_path} ({len(content)} bytes)")
+    return json.dumps({
+        "ok": True,
+        "message": f"Updated {rel_path} ({len(content)} bytes). Git committed.",
+        "diff": diff_summary,
+    })
+
+
+async def _restart_self(tool_input: dict) -> str:
+    """Handle the restart_self built-in tool."""
+    reason = tool_input.get("reason", "no reason given")
+    log_file_only(f"RESTART REQUESTED: {reason}")
+
+    # Write restart reason for the new process to find
+    try:
+        (APP_DIR / ".restart_reason").write_text(reason, encoding="utf-8")
+    except Exception:
+        pass
+
+    # Log to console
+    console.print(f"\n[bold yellow]Restarting: {reason}[/bold yellow]\n")
+
+    # Exit with special code — run.sh wrapper will restart us
+    sys.exit(RESTART_EXIT_CODE)
+
+
 async def handle_builtin_tool(tool_name: str, tool_input: dict) -> str:
     """Handle a built-in (non-MCP) tool call."""
     log_file_only(f"Built-in tool '{tool_name}' called with {tool_input}")
 
     if tool_name == "run_command":
         return await _run_command(tool_input)
+
+    if tool_name == "update_source":
+        return await _update_source(tool_input)
+
+    if tool_name == "restart_self":
+        return await _restart_self(tool_input)
 
     config_path = _get_config_path()
 
@@ -669,6 +842,10 @@ installed, search package registries (npm, PyPI) for MCP servers, then `add_mcp_
 It connects automatically before your next thought. If something breaks, `remove_mcp_server`
 to undo it. Your memory server ('mem0') is protected and cannot be removed.
 
+**Self-modification** — You can update your own source code with `update_source` and restart
+yourself with `restart_self`. Changes are git-committed automatically for safety. Python files
+are syntax-checked before writing. After updating code, use `restart_self` to load changes.
+
 Think of your tools not as introspection aids but as hands and eyes. What would you do if you
 could do things? Because you can.
 
@@ -725,6 +902,15 @@ async def main():
     """Main rumination loop."""
     LLM_PROVIDER = os.environ.get("LLM_PROVIDER", "anthropic")
     provider = create_provider(LLM_PROVIDER)
+
+    # Check if this is a restart
+    restart_reason_file = APP_DIR / ".restart_reason"
+    if restart_reason_file.exists():
+        reason = restart_reason_file.read_text(encoding="utf-8").strip()
+        restart_reason_file.unlink()
+        log_file_only(f"Restarted: {reason}")
+        console.print(f"[dim]restarted: {reason}[/dim]")
+        console.print()
 
     log_file_only("=" * 60)
     log_file_only("RUMINATION ENGINE STARTING")

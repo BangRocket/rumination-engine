@@ -1,0 +1,16 @@
+[Unit]
+Description=Rumination Engine
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/rumination-engine
+ExecStart=/opt/rumination-engine/run.sh
+EnvironmentFile=/opt/rumination-engine/.env
+Restart=on-failure
+RestartSec=10
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
