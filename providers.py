@@ -205,7 +205,6 @@ def _to_openai_tools(tools: list[dict]) -> list[dict]:
     oai_tools = []
     for tool in tools:
         params = dict(tool.get("input_schema", {}))
-        params.pop("cache_control", None)
         oai_tools.append({
             "type": "function",
             "function": {
@@ -304,6 +303,8 @@ class OpenAIProvider:
                 return thought, tool_trace
 
             # Tool calls — append assistant message, dispatch tools
+            if message.content:
+                text_parts.append(message.content)
             oai_messages.append(message)
             if message.content:
                 sys.stdout.write("\n")
