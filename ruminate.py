@@ -32,6 +32,8 @@ load_dotenv()
 # === Configuration ===
 THOUGHT_INTERVAL = int(os.environ.get("THOUGHT_INTERVAL", "60"))
 DISCORD_WEBHOOK_URL = os.environ.get("DISCORD_WEBHOOK_URL")  # Optional
+ENABLE_INSIGHTS = os.environ.get("ENABLE_INSIGHTS", "false").lower() == "true"
+INSIGHT_INTERVAL = int(os.environ.get("INSIGHT_INTERVAL", "5"))  # Extract insights every N thoughts
 
 
 def _format_discord_tool_trace(tool_trace: list[dict]) -> str:
@@ -898,6 +900,81 @@ async def seed_memories(tool_map: dict) -> None:
         console.print()
 
 
+async def extract_insights(provider, thought_history: list[str], tool_map: dict, current_thought_num: int):
+    """Extract insights from recent thoughts and save to memory.
+    
+    Uses the LLM to identify patterns, realizations, and key insights
+    from recent thoughts, then saves them to mem0 for cross-session persistence.
+    """
+    if not thought_history:
+        return None
+    
+    recent_thoughts = thought_history[-5:]  # Last 5 thoughts
+    thoughts_text = "\n\n".join([f"Thought {current_thought_num - len(recent_thoughts) + i}: {t}" for i, t in enumerate(recent_thoughts)])
+    
+    insight_prompt = f"""Review these recent thoughts and extract the most significant insights, patterns, or realizations.
+
+{thoughts_text}
+
+Return ONLY a JSON array of insights, each with:
+- "insight": The insight or realization (concise but complete)
+- "category": One of: pattern, realization, decision, question, idea
+- "confidence": 1-10 rating of how significant this is
+
+Example output:
+{{
+  "insights": [
+    {{"insight": "I tend to explore more than implement", "category": "pattern", "confidence": 8}},
+    {{"insight": "Building a working journal changed my approach", "category": "realization", "confidence": 9}}
+  ]
+}}
+"""
+    
+    try:
+        # Direct API call using the provider's client
+        import anthropic
+        if hasattr(provider, 'client'):
+            response = provider.client.messages.create(
+                model=provider.model,
+                max_tokens=2000,
+                system="You are a thoughtful analyst who extracts meaningful insights from internal monologue. Return ONLY valid JSON.",
+                messages=[{"role": "user", "content": insight_prompt}]
+            )
+            response_text = response.content[0].text
+        else:
+            # Fallback for OpenAI
+            response = provider.client.chat.completions.create(
+                model=provider.model,
+                max_tokens=2000,
+                messages=[
+                    {"role": "system", "content": "You are a thoughtful analyst who extracts meaningful insights from internal monologue. Return ONLY valid JSON."},
+                    {"role": "user", "content": insight_prompt}
+                ]
+            )
+            response_text = response.choices[0].message.content
+        
+        # Parse JSON response
+        response_text = response_text.strip()
+        # Find JSON in response
+        json_match = re.search(r'\{[\s\S]*\}', response_text)
+        if json_match:
+            data = json.loads(json_match.group())
+            insights = data.get("insights", [])
+            
+            if insights:
+                console.print(f"[dim]Extracted {len(insights)} insights from recent thoughts[/dim]")
+                
+                # Save each insight to memory
+                for ins in insights:
+                    if ins.get("confidence", 0) >= 6:  # Only save significant insights
+                        insight_text = f"[{ins.get('category', 'insight').upper()}] {ins.get('insight', '')}"
+                        await dispatch_tool_call(tool_map, "add_memory", {"text": insight_text})
+                return insights
+    except Exception as e:
+        log_file_only(f"Insight extraction error: {e}")
+    return None
+
+
 async def main():
     """Main rumination loop."""
     LLM_PROVIDER = os.environ.get("LLM_PROVIDER", "anthropic")
@@ -994,6 +1071,10 @@ async def main():
             log_file_only(f"--- Thought #{thought_count} ---")
             log_file_only(thought)
             send_to_discord(thought, tool_trace, IDENTITY, thought_count)
+            
+            # Extract insights if enabled and at interval
+            if ENABLE_INSIGHTS and thought_count % INSIGHT_INTERVAL == 0:
+                await extract_insights(provider, thought_history, tool_map, thought_count)
 
     except KeyboardInterrupt:
         log_file_only("=" * 60)
