@@ -14,7 +14,7 @@ while true; do
     start_time=$(date +%s)
 
     echo "[run.sh] Starting ruminate.py..."
-    python -u ruminate.py
+    poetry run python -u ruminate.py
     exit_code=$?
 
     if [ $exit_code -ne 42 ]; then
