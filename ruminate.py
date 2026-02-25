@@ -353,6 +353,12 @@ async def connect_mcp_servers(config: dict) -> tuple[dict, list[dict], list]:
     return tool_map, anthropic_tools, active_contexts
 
 
+# Max chars for a single tool result before truncation. Large results (e.g.
+# directory_tree on a project with node_modules/) can be millions of chars
+# and blow up the LLM's context window.
+MAX_TOOL_RESULT_CHARS = 8000
+
+
 async def dispatch_tool_call(tool_map: dict, tool_name: str, tool_input: dict) -> str:
     """Dispatch a tool call to the correct MCP server (or built-in handler)."""
     if tool_name in BUILTIN_TOOL_NAMES:
@@ -373,6 +379,9 @@ async def dispatch_tool_call(tool_map: dict, tool_name: str, tool_input: dict) -
             else:
                 parts.append(str(content))
         output = "\n".join(parts)
+        if len(output) > MAX_TOOL_RESULT_CHARS:
+            log_file_only(f"Tool '{tool_name}' result truncated: {len(output)} -> {MAX_TOOL_RESULT_CHARS} chars")
+            output = output[:MAX_TOOL_RESULT_CHARS] + f"\n\n[truncated — result was {len(output)} chars, showing first {MAX_TOOL_RESULT_CHARS}]"
         log_file_only(f"Tool '{tool_name}' result: {output[:500]}")
         return output
     except Exception as e:
