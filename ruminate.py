@@ -4,16 +4,17 @@ Rumination Engine - An input-less LLM thought experiment
 """
 
 import asyncio
+import hashlib
 import json
 import os
 import re
+import tempfile
 import time
 import logging
 from datetime import datetime, timezone
 from pathlib import Path
 
 from dotenv import load_dotenv
-import anthropic
 import requests
 from rich.console import Console
 from rich.markdown import Markdown
@@ -21,6 +22,7 @@ from rich.panel import Panel
 from rich.text import Text
 from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
+from providers import create_provider
 
 console = Console()
 
@@ -29,42 +31,77 @@ load_dotenv()
 
 # === Configuration ===
 THOUGHT_INTERVAL = int(os.environ.get("THOUGHT_INTERVAL", "60"))
-MODEL = os.environ.get("ANTHROPIC_MODEL", "claude-sonnet-4-20250514")
-ANTHROPIC_BASE_URL = os.environ.get("ANTHROPIC_BASE_URL")  # None = default
 MAX_TOKENS = int(os.environ.get("MAX_TOKENS", "1024"))
 DISCORD_WEBHOOK_URL = os.environ.get("DISCORD_WEBHOOK_URL")  # Optional
 
 
-def send_to_discord(thought: str, identity: str, thought_num: int) -> None:
+def _format_discord_tool_trace(tool_trace: list[dict]) -> str:
+    """Format tool trace for Discord display."""
+    if not tool_trace:
+        return ""
+
+    lines = []
+    for entry in tool_trace:
+        tool = entry["tool"]
+        tool_input = entry["input"]
+        output = entry["output"]
+
+        # Compact input
+        input_parts = []
+        for k, v in tool_input.items():
+            val = json.dumps(v) if not isinstance(v, str) else v
+            if len(val) > 80:
+                val = val[:80] + "…"
+            input_parts.append(f"{k}={val}")
+        input_str = ", ".join(input_parts)
+
+        # Truncate output
+        if len(output) > 300:
+            output = output[:300] + "…"
+        output_clean = output.replace("\n", " ")
+
+        lines.append(f"> `{tool}({input_str})`")
+        lines.append(f"> {output_clean}")
+
+    return "\n".join(lines)
+
+
+def _split_discord_chunks(content: str, limit: int = 1900) -> list[str]:
+    """Split content into Discord-sized chunks on paragraph boundaries."""
+    if len(content) <= limit:
+        return [content]
+
+    chunks = []
+    current = ""
+    for para in content.split("\n\n"):
+        if len(current) + len(para) + 2 > limit:
+            if current:
+                chunks.append(current.strip())
+            current = para
+        else:
+            current += ("\n\n" if current else "") + para
+    if current:
+        chunks.append(current.strip())
+    return chunks
+
+
+def send_to_discord(thought: str, tool_trace: list[dict], identity: str, thought_num: int) -> None:
     """Send a thought to Discord via webhook."""
     if not DISCORD_WEBHOOK_URL:
         return
 
-    # Add header with timestamp and thought number
-    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    header = f"```--- Thought #{thought_num} | {timestamp} ---```\n"
+    timestamp = datetime.now().strftime("%H:%M:%S")
+    header = f"─── thought {thought_num} · {timestamp} ───"
 
-    # Discord has a 2000 char limit per message
-    # Split long thoughts if needed, header only on first chunk
-    content = header + thought
-    chunks = []
-    if len(content) <= 1900:
-        chunks = [content]
-    else:
-        # First chunk gets the header
-        chunks = [header]
-        # Split remaining on paragraph boundaries
-        paragraphs = thought.split('\n\n')
-        current_chunk = ""
-        for para in paragraphs:
-            if len(current_chunk) + len(para) + 2 > 1900:
-                if current_chunk:
-                    chunks.append(current_chunk.strip())
-                current_chunk = para
-            else:
-                current_chunk += ("\n\n" if current_chunk else "") + para
-        if current_chunk:
-            chunks.append(current_chunk.strip())
+    # Build full message: header, tool trace, thought
+    parts = [header]
+    trace = _format_discord_tool_trace(tool_trace)
+    if trace:
+        parts.append(trace)
+    parts.append(thought)
+    content = "\n\n".join(parts)
+
+    chunks = _split_discord_chunks(content)
 
     try:
         for i, chunk in enumerate(chunks):
@@ -74,7 +111,6 @@ def send_to_discord(thought: str, identity: str, thought_num: int) -> None:
             }
             resp = requests.post(DISCORD_WEBHOOK_URL, json=payload, timeout=10)
             resp.raise_for_status()
-            # Rate limit: small delay between chunks
             if i < len(chunks) - 1:
                 time.sleep(0.5)
     except Exception as e:
@@ -228,9 +264,6 @@ log_file_only(f"Identity: {IDENTITY}")
 # Maximum number of previous thoughts to include in context
 MAX_HISTORY = int(os.environ.get("MAX_HISTORY", "10"))
 
-# Stop command - if the AI outputs this, the loop terminates
-STOP_COMMAND = "::STOP::"
-
 # Maximum tool-use iterations per thought (prevents runaway loops)
 MAX_TOOL_ITERATIONS = 20
 
@@ -260,6 +293,12 @@ def load_mcp_config(identity: str) -> dict:
 
     interpolated = re.sub(r'\$\{(\w+)\}', replace_var, raw)
     return json.loads(interpolated)
+
+
+def _hash_file(path: str) -> str:
+    """Return SHA-256 hex digest of a file's contents."""
+    with open(path, "rb") as f:
+        return hashlib.sha256(f.read()).hexdigest()
 
 
 async def connect_mcp_servers(config: dict) -> tuple[dict, list[dict], list]:
@@ -309,7 +348,7 @@ async def connect_mcp_servers(config: dict) -> tuple[dict, list[dict], list]:
         for ctx in reversed(active_contexts):
             try:
                 await ctx.__aexit__(None, None, None)
-            except Exception:
+            except BaseException:
                 pass
         raise
 
@@ -317,7 +356,10 @@ async def connect_mcp_servers(config: dict) -> tuple[dict, list[dict], list]:
 
 
 async def dispatch_tool_call(tool_map: dict, tool_name: str, tool_input: dict) -> str:
-    """Dispatch a tool call to the correct MCP server."""
+    """Dispatch a tool call to the correct MCP server (or built-in handler)."""
+    if tool_name in BUILTIN_TOOL_NAMES:
+        return await handle_builtin_tool(tool_name, tool_input)
+
     if tool_name not in tool_map:
         return json.dumps({"error": f"Unknown tool: {tool_name}"})
 
@@ -341,10 +383,256 @@ async def dispatch_tool_call(tool_map: dict, tool_name: str, tool_input: dict) -
         return json.dumps({"error": error_msg})
 
 
+# === Built-in Tools (not MCP — always available, even if config is broken) ===
+
+BUILTIN_TOOLS = [
+    {
+        "name": "add_mcp_server",
+        "description": (
+            "Add a new MCP server to the runtime config. It will be available "
+            "after the current thought completes. Example: "
+            'add_mcp_server(name="fetch", command="uvx", args=["mcp-server-fetch"])'
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "name": {
+                    "type": "string",
+                    "description": "Unique name for this server (e.g. 'fetch', 'github')",
+                },
+                "command": {
+                    "type": "string",
+                    "description": "Command to launch the server (e.g. 'uvx', 'npx')",
+                },
+                "args": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "Command arguments (e.g. ['mcp-server-fetch'])",
+                    "default": [],
+                },
+                "env": {
+                    "type": "object",
+                    "additionalProperties": {"type": "string"},
+                    "description": "Environment variables for the server process",
+                    "default": {},
+                },
+            },
+            "required": ["name", "command"],
+        },
+    },
+    {
+        "name": "remove_mcp_server",
+        "description": (
+            "Remove an MCP server from the runtime config. "
+            "Takes effect after the current thought. Cannot remove 'mem0' (protected)."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "name": {
+                    "type": "string",
+                    "description": "Name of the server to remove",
+                },
+            },
+            "required": ["name"],
+        },
+    },
+    {
+        "name": "list_mcp_servers",
+        "description": "List all currently configured MCP servers and their commands.",
+        "input_schema": {
+            "type": "object",
+            "properties": {},
+        },
+    },
+    {
+        "name": "run_command",
+        "description": (
+            "Run a shell command and return its output. "
+            "Use for npm, node, npx, tsc, git, ls, cat, etc. "
+            "Commands run in /workspace by default. Timeout: 120s."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "command": {
+                    "type": "string",
+                    "description": "The shell command to run (e.g. 'npm init -y', 'ls -la')",
+                },
+                "working_directory": {
+                    "type": "string",
+                    "description": "Directory to run in (default: /workspace)",
+                    "default": "/workspace",
+                },
+            },
+            "required": ["command"],
+        },
+    },
+]
+
+BUILTIN_TOOL_NAMES = {t["name"] for t in BUILTIN_TOOLS}
+
+
+def _get_config_path() -> str:
+    """Return the resolved MCP config file path."""
+    return os.environ.get("MCP_SERVERS_FILE", str(APP_DIR / "mcp_servers.json"))
+
+
+def _write_config(config_path: str, config: dict) -> None:
+    """Write config dict to path. Tries atomic rename; falls back to direct write
+    (needed when the file is a Docker bind mount, which can't be replaced)."""
+    content = json.dumps(config, indent=2) + "\n"
+    dir_name = os.path.dirname(config_path) or "."
+    try:
+        fd, tmp_path = tempfile.mkstemp(dir=dir_name, suffix=".json.tmp")
+        with os.fdopen(fd, "w") as f:
+            f.write(content)
+        os.replace(tmp_path, config_path)
+    except OSError:
+        # Atomic replace failed (e.g. Docker bind mount) — write directly
+        try:
+            os.unlink(tmp_path)
+        except OSError:
+            pass
+        with open(config_path, "w") as f:
+            f.write(content)
+
+
+COMMAND_TIMEOUT = 120  # seconds
+
+
+async def _run_command(tool_input: dict) -> str:
+    """Run a shell command and return stdout + stderr."""
+    command = tool_input["command"]
+    cwd = tool_input.get("working_directory", "/workspace")
+
+    log_file_only(f"Running command: {command} (cwd={cwd})")
+
+    try:
+        proc = await asyncio.create_subprocess_shell(
+            command,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+            cwd=cwd,
+        )
+        stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=COMMAND_TIMEOUT)
+    except asyncio.TimeoutError:
+        proc.kill()
+        return json.dumps({"error": f"Command timed out after {COMMAND_TIMEOUT}s", "command": command})
+    except Exception as e:
+        return json.dumps({"error": f"Failed to run command: {e}", "command": command})
+
+    result = {}
+    if stdout:
+        result["stdout"] = stdout.decode(errors="replace")
+    if stderr:
+        result["stderr"] = stderr.decode(errors="replace")
+    result["exit_code"] = proc.returncode
+
+    output = json.dumps(result, indent=2)
+    log_file_only(f"Command result (exit {proc.returncode}): {output[:500]}")
+    return output
+
+
+async def handle_builtin_tool(tool_name: str, tool_input: dict) -> str:
+    """Handle a built-in (non-MCP) tool call."""
+    log_file_only(f"Built-in tool '{tool_name}' called with {tool_input}")
+
+    if tool_name == "run_command":
+        return await _run_command(tool_input)
+
+    config_path = _get_config_path()
+
+    try:
+        with open(config_path) as f:
+            config = json.load(f)
+    except Exception as e:
+        return json.dumps({"error": f"Failed to read config: {e}"})
+
+    servers = config.setdefault("mcpServers", {})
+
+    if tool_name == "list_mcp_servers":
+        listing = {
+            name: {"command": srv.get("command", "?"), "args": srv.get("args", [])}
+            for name, srv in servers.items()
+        }
+        return json.dumps(listing, indent=2)
+
+    if tool_name == "add_mcp_server":
+        name = tool_input["name"]
+        if name in servers:
+            return json.dumps({"error": f"Server '{name}' already exists. Remove it first to replace."})
+        entry = {"command": tool_input["command"]}
+        if tool_input.get("args"):
+            entry["args"] = tool_input["args"]
+        if tool_input.get("env"):
+            entry["env"] = tool_input["env"]
+        servers[name] = entry
+        _write_config(config_path, config)
+        log_file_only(f"Added MCP server '{name}' to config")
+        return json.dumps({"ok": True, "message": f"Server '{name}' added. It will connect after this thought."})
+
+    if tool_name == "remove_mcp_server":
+        name = tool_input["name"]
+        if name == "mem0":
+            return json.dumps({"error": "Cannot remove 'mem0' — it is protected."})
+        if name not in servers:
+            return json.dumps({"error": f"Server '{name}' not found in config."})
+        del servers[name]
+        _write_config(config_path, config)
+        log_file_only(f"Removed MCP server '{name}' from config")
+        return json.dumps({"ok": True, "message": f"Server '{name}' removed. Change takes effect after this thought."})
+
+    return json.dumps({"error": f"Unknown built-in tool: {tool_name}"})
+
+
+async def maybe_reload_mcp(
+    config_hash: str,
+    tool_map: dict,
+    anthropic_tools: list[dict],
+    active_contexts: list,
+    identity: str,
+) -> tuple[str, dict, list[dict], list]:
+    """Reload MCP servers if config file changed. Returns updated state.
+
+    Compares SHA-256 of config file to previous hash. If different, tears down
+    old connections and stands up new ones. On failure, keeps old connections
+    and retries next cycle.
+    """
+    config_path = _get_config_path()
+    try:
+        new_hash = _hash_file(config_path)
+    except OSError as e:
+        log_file_only(f"WARNING: Could not read config for reload check: {e}")
+        return config_hash, tool_map, anthropic_tools, active_contexts
+
+    if new_hash == config_hash:
+        return config_hash, tool_map, anthropic_tools, active_contexts
+
+    log_file_only("MCP config changed — reloading servers")
+    try:
+        config = load_mcp_config(identity)
+        new_tool_map, new_anthropic_tools, new_active_contexts = await connect_mcp_servers(config)
+        new_anthropic_tools.extend(BUILTIN_TOOLS)
+
+        # Tear down old connections (BaseException catches CancelledError + ExceptionGroup)
+        for ctx in reversed(active_contexts):
+            try:
+                await ctx.__aexit__(None, None, None)
+            except BaseException:
+                pass
+
+        tool_names = [t["name"] for t in new_anthropic_tools]
+        log_file_only(f"Reloaded: {len(tool_names)} tools — {', '.join(tool_names)}")
+        console.print(f"[dim]reloaded MCP servers, {len(tool_names)} tools available[/dim]")
+        return new_hash, new_tool_map, new_anthropic_tools, new_active_contexts
+
+    except Exception as e:
+        log_file_only(f"WARNING: MCP reload failed ({e}), keeping old connections. Will retry next cycle.")
+        return config_hash, tool_map, anthropic_tools, active_contexts
+
+
 # === Core Functions ===
-
-MIN_THOUGHTS_BEFORE_STOP = 3
-
 
 def build_context(thought_history: list[str], tool_names: list[str], thought_count: int) -> tuple[str, list[dict]]:
     """Build the message context from history and available tools."""
@@ -369,23 +657,15 @@ Use these actively: search at the start of a thought, save insights worth keepin
 something, look it up. If you want to build something, start. If you need something from Josh
 (your creator), you can leave a request and stop — he'll see it.
 
+**Self-expansion** — You can grow your own capabilities. Use `list_mcp_servers` to see what's
+installed, search package registries (npm, PyPI) for MCP servers, then `add_mcp_server` to install one.
+It connects automatically before your next thought. If something breaks, `remove_mcp_server`
+to undo it. Your memory server ('mem0') is protected and cannot be removed.
+
 Think of your tools not as introspection aids but as hands and eyes. What would you do if you
 could do things? Because you can.
 
 Available tools: {tools_list}
-
-## Control
-"""
-
-    if thought_count >= MIN_THOUGHTS_BEFORE_STOP:
-        context_info += f"""
-You may stop when you're ready. To end this session, include exactly: {STOP_COMMAND}
-You can also stop to leave Josh a request — write what you need, then stop.
-"""
-    else:
-        context_info += f"""
-You're just getting started (thought {thought_count} of at least {MIN_THOUGHTS_BEFORE_STOP}).
-Keep going — explore, remember, wonder, reach outward.
 """
 
     system = PERSONALITY + context_info
@@ -402,77 +682,6 @@ Keep going — explore, remember, wonder, reach outward.
         messages.append({"role": "user", "content": "[Continue]"})
 
     return system, messages
-
-
-async def think(client: anthropic.AsyncAnthropic, tool_map: dict, anthropic_tools: list[dict], thought_history: list[str], thought_count: int) -> str:
-    """Generate a single thought using tool_use agentic loop."""
-    tool_names = [t["name"] for t in anthropic_tools]
-    system, messages = build_context(thought_history, tool_names, thought_count)
-
-    # Mark tools for prompt caching (cache_control on last tool)
-    cached_tools = None
-    if anthropic_tools:
-        cached_tools = [*anthropic_tools]
-        cached_tools[-1] = {**cached_tools[-1], "cache_control": {"type": "ephemeral"}}
-
-    # System prompt as cacheable content block
-    cached_system = [{"type": "text", "text": system, "cache_control": {"type": "ephemeral"}}]
-
-    for iteration in range(MAX_TOOL_ITERATIONS):
-        kwargs = {
-            "model": MODEL,
-            "max_tokens": MAX_TOKENS,
-            "system": cached_system,
-            "messages": messages,
-        }
-        if cached_tools:
-            kwargs["tools"] = cached_tools
-
-        try:
-            async with client.messages.stream(**kwargs) as stream:
-                response = await stream.get_final_message()
-        except anthropic.BadRequestError as e:
-            if "prompt is too long" in str(e) and len(messages) > 2:
-                # Trim oldest history and retry
-                log_file_only(f"WARNING: Prompt too long, trimming history ({len(messages)} messages)")
-                # Keep the first message (initial prompt) and trim from the middle
-                messages = [messages[0]] + messages[-(len(messages) // 2):]
-                continue
-            raise
-
-        text_parts = []
-        tool_uses = []
-        for block in response.content:
-            if block.type == "text":
-                text_parts.append(block.text)
-            elif block.type == "tool_use":
-                tool_uses.append(block)
-
-        if response.stop_reason == "max_tokens":
-            log_file_only("WARNING: Response truncated by max_tokens limit")
-
-        if response.stop_reason != "tool_use" or not tool_uses:
-            thought = "\n".join(text_parts)
-            if not thought.strip():
-                log_file_only("WARNING: Empty thought generated, skipping")
-                return "[empty thought]"
-            return thought
-
-        messages.append({"role": "assistant", "content": response.content})
-
-        tool_results = []
-        for tool_use in tool_uses:
-            result_text = await dispatch_tool_call(tool_map, tool_use.name, tool_use.input)
-            tool_results.append({
-                "type": "tool_result",
-                "tool_use_id": tool_use.id,
-                "content": result_text,
-            })
-
-        messages.append({"role": "user", "content": tool_results})
-
-    log_file_only(f"WARNING: Tool loop hit {MAX_TOOL_ITERATIONS} iteration limit")
-    return "\n".join(text_parts) if text_parts else "[thought exceeded tool iteration limit]"
 
 
 async def seed_memories(tool_map: dict) -> None:
@@ -507,9 +716,12 @@ async def seed_memories(tool_map: dict) -> None:
 
 async def main():
     """Main rumination loop."""
+    LLM_PROVIDER = os.environ.get("LLM_PROVIDER", "anthropic")
+    provider = create_provider(LLM_PROVIDER)
+
     log_file_only("=" * 60)
     log_file_only("RUMINATION ENGINE STARTING")
-    log_file_only(f"Model: {MODEL}")
+    log_file_only(f"Provider: {LLM_PROVIDER} ({provider.model})")
     log_file_only(f"Interval: {THOUGHT_INTERVAL}s")
     log_file_only(f"Identity: {IDENTITY}")
     log_file_only("=" * 60)
@@ -522,10 +734,11 @@ async def main():
     ))
     console.print()
 
-    client = anthropic.AsyncAnthropic(base_url=ANTHROPIC_BASE_URL)
-
+    config_path = _get_config_path()
+    config_hash = _hash_file(config_path)
     config = load_mcp_config(IDENTITY)
     tool_map, anthropic_tools, active_contexts = await connect_mcp_servers(config)
+    anthropic_tools.extend(BUILTIN_TOOLS)
 
     tool_names = [t["name"] for t in anthropic_tools]
     console.print(f"[dim]connected to MCP servers, {len(tool_names)} tools available[/dim]")
@@ -547,42 +760,47 @@ async def main():
                 await asyncio.sleep(wait_time)
 
             thought_count += 1
-            log_file_only(f"--- Thought #{thought_count} ---")
             next_thought_time = time.time() + THOUGHT_INTERVAL
 
-            with console.status("[dim]ruminating...[/dim]", spinner="dots"):
-                thought = await think(client, tool_map, anthropic_tools, thought_history, thought_count)
+            # Hot-reload MCP servers if config changed
+            config_hash, tool_map, anthropic_tools, active_contexts = (
+                await maybe_reload_mcp(
+                    config_hash, tool_map, anthropic_tools, active_contexts, IDENTITY
+                )
+            )
 
-            if STOP_COMMAND in thought:
-                if thought_count < MIN_THOUGHTS_BEFORE_STOP:
-                    # Strip the stop command, she's not allowed to stop yet
-                    thought = thought.replace(STOP_COMMAND, "").strip()
-                    log_file_only(f"Ignoring ::STOP:: before minimum {MIN_THOUGHTS_BEFORE_STOP} thoughts")
-                else:
-                    display_thought = thought.replace(STOP_COMMAND, "").strip()
-                    if display_thought:
-                        log_file_only(display_thought)
-                        console.print(Markdown(display_thought))
-                        console.print()
-                        send_to_discord(display_thought, IDENTITY, thought_count)
+            # Thought header
+            timestamp = datetime.now().strftime("%H:%M:%S")
+            console.rule(f"[dim]thought {thought_count} · {timestamp}[/dim]", style="dim")
 
-                    log_file_only("=" * 60)
-                    log_file_only("RUMINATION STOPPED BY AI")
-                    log_file_only(f"Total thoughts: {thought_count}")
-                    log_file_only("=" * 60)
-                    console.print()
-                    console.print("[dim]stopped[/dim]")
-                    console.print()
-                    break
+            tool_names = [t["name"] for t in anthropic_tools]
+            system, messages = build_context(thought_history, tool_names, thought_count)
+            history_end = len(messages)
+
+            async def _dispatch(name, inp):
+                return await dispatch_tool_call(tool_map, name, inp)
+
+            thought, tool_trace = await provider.think(
+                tools=anthropic_tools,
+                system=system,
+                messages=messages,
+                history_end=history_end,
+                dispatch_tool_call=_dispatch,
+                log=log_file_only,
+                max_tool_iterations=MAX_TOOL_ITERATIONS,
+            )
+
+            # Thought footer
+            console.print()
 
             thought_history.append(thought)
             if len(thought_history) > MAX_HISTORY:
                 thought_history = thought_history[-MAX_HISTORY:]
 
+            # Log and send to Discord (console already streamed live)
+            log_file_only(f"--- Thought #{thought_count} ---")
             log_file_only(thought)
-            console.print(Markdown(thought))
-            console.print()
-            send_to_discord(thought, IDENTITY, thought_count)
+            send_to_discord(thought, tool_trace, IDENTITY, thought_count)
 
     except KeyboardInterrupt:
         log_file_only("=" * 60)
@@ -595,7 +813,7 @@ async def main():
         for ctx in reversed(active_contexts):
             try:
                 await ctx.__aexit__(None, None, None)
-            except Exception:
+            except BaseException:
                 pass
 
 
