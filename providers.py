@@ -273,24 +273,51 @@ class OpenAIProvider:
             if openai_tools:
                 kwargs["tools"] = openai_tools
 
-            response = None
-            streamed_text = ""
+            # Accumulate streamed response manually (lower-level API avoids
+            # the .stream() helper's "strict" tool schema requirement)
+            accumulated_content = ""
+            accumulated_tool_calls: dict[int, dict] = {}  # index -> {id, name, arguments}
+            finish_reason = None
+            errored = False
+
             for attempt in range(3):
                 try:
-                    async with self.client.chat.completions.stream(**kwargs) as stream:
-                        async for event in stream:
-                            if event.type == "content.delta":
-                                if event.delta:
-                                    sys.stdout.write(event.delta)
-                                    sys.stdout.flush()
-                                    streamed_text += event.delta
-                        response = await stream.get_final_completion()
+                    stream = await self.client.chat.completions.create(stream=True, **kwargs)
+                    async for chunk in stream:
+                        if not chunk.choices:
+                            continue
+                        delta = chunk.choices[0].delta
+                        if chunk.choices[0].finish_reason:
+                            finish_reason = chunk.choices[0].finish_reason
+
+                        # Stream text content
+                        if delta.content:
+                            sys.stdout.write(delta.content)
+                            sys.stdout.flush()
+                            accumulated_content += delta.content
+
+                        # Accumulate tool call deltas
+                        if delta.tool_calls:
+                            for tc_delta in delta.tool_calls:
+                                idx = tc_delta.index
+                                if idx not in accumulated_tool_calls:
+                                    accumulated_tool_calls[idx] = {
+                                        "id": tc_delta.id or "",
+                                        "name": tc_delta.function.name if tc_delta.function and tc_delta.function.name else "",
+                                        "arguments": "",
+                                    }
+                                entry = accumulated_tool_calls[idx]
+                                if tc_delta.id:
+                                    entry["id"] = tc_delta.id
+                                if tc_delta.function:
+                                    if tc_delta.function.name:
+                                        entry["name"] = tc_delta.function.name
+                                    if tc_delta.function.arguments:
+                                        entry["arguments"] += tc_delta.function.arguments
                     break
                 except openai.BadRequestError as e:
                     err_msg = str(e).lower()
                     if ("context length" in err_msg or "too long" in err_msg) and history_end > 3:
-                        # Trim history (mirroring AnthropicProvider's overflow logic)
-                        # oai_messages[0] is system, [1:history_end+1] is history
                         hist_start = 1  # after system message
                         hist_end = hist_start + history_end
                         history = oai_messages[hist_start:hist_end]
@@ -301,13 +328,16 @@ class OpenAIProvider:
                         history_end = len(history)
                         oai_messages = [oai_messages[0]] + history + tool_chain
                         log(f"WARNING: Prompt too long, trimmed {pairs_to_remove} history pairs ({len(oai_messages)} messages remain)")
-                        break  # retry via outer loop since response is None
+                        finish_reason = None
+                        break  # retry via outer loop
                     raise
                 except (openai.APIConnectionError, openai.APITimeoutError) as e:
                     log(f"WARNING: Transient API error (attempt {attempt + 1}/3): {e}")
                     if attempt < 2:
                         await asyncio.sleep(2 ** attempt)
-                        streamed_text = ""
+                        accumulated_content = ""
+                        accumulated_tool_calls.clear()
+                        finish_reason = None
                         continue
                     sys.stdout.write("\n")
                     return f"[thought interrupted: {e}]", tool_trace
@@ -316,36 +346,45 @@ class OpenAIProvider:
                     sys.stdout.write("\n")
                     return f"[thought interrupted: {e}]", tool_trace
 
-            if response is None:
+            if finish_reason is None:
                 continue  # prompt was trimmed, retry
 
-            choice = response.choices[0]
-            message = choice.message
-
-            if choice.finish_reason == "length":
+            if finish_reason == "length":
                 log("WARNING: Response truncated by max_tokens limit")
 
+            # Build tool_calls list from accumulated deltas
+            tool_calls = [accumulated_tool_calls[i] for i in sorted(accumulated_tool_calls)]
+
             # No tool calls — return the text
-            if choice.finish_reason != "tool_calls" or not message.tool_calls:
+            if finish_reason != "tool_calls" or not tool_calls:
                 sys.stdout.write("\n\n")
                 sys.stdout.flush()
-                thought = message.content or ""
+                thought = accumulated_content or ""
                 if not thought.strip():
                     log("WARNING: Empty thought generated, skipping")
                     return "[empty thought]", tool_trace
                 return thought, tool_trace
 
-            # Tool calls — append assistant message, dispatch tools
-            if message.content:
-                text_parts.append(message.content)
-            oai_messages.append(message)
-            if message.content:
+            # Tool calls — build assistant message, dispatch tools
+            if accumulated_content:
+                text_parts.append(accumulated_content)
+            # Reconstruct assistant message for conversation history
+            assistant_msg: dict = {"role": "assistant", "content": accumulated_content or None}
+            assistant_msg["tool_calls"] = [
+                {
+                    "id": tc["id"],
+                    "type": "function",
+                    "function": {"name": tc["name"], "arguments": tc["arguments"]},
+                }
+                for tc in tool_calls
+            ]
+            oai_messages.append(assistant_msg)
+            if accumulated_content:
                 sys.stdout.write("\n")
 
-            for tool_call in message.tool_calls:
-                func = tool_call.function
+            for tc in tool_calls:
                 try:
-                    tool_input = json.loads(func.arguments)
+                    tool_input = json.loads(tc["arguments"])
                 except json.JSONDecodeError:
                     tool_input = {}
 
@@ -353,9 +392,9 @@ class OpenAIProvider:
                 input_brief = ", ".join(
                     f"{k}={json.dumps(v)[:60]}" for k, v in tool_input.items()
                 )
-                self.console.print(f"[dim italic]  ↳ {func.name}({input_brief})[/dim italic]")
+                self.console.print(f"[dim italic]  ↳ {tc['name']}({input_brief})[/dim italic]")
 
-                result_text = await dispatch_tool_call(func.name, tool_input)
+                result_text = await dispatch_tool_call(tc["name"], tool_input)
 
                 result_preview = result_text[:300].replace("\n", " ").strip()
                 if len(result_text) > 300:
@@ -364,13 +403,13 @@ class OpenAIProvider:
                 self.console.print()
 
                 tool_trace.append({
-                    "tool": func.name,
+                    "tool": tc["name"],
                     "input": tool_input,
                     "output": result_text,
                 })
                 oai_messages.append({
                     "role": "tool",
-                    "tool_call_id": tool_call.id,
+                    "tool_call_id": tc["id"],
                     "content": result_text,
                 })
 
