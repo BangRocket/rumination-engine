@@ -62,7 +62,7 @@ class AnthropicProvider:
         self.model = model
         self.max_tokens = max_tokens
         self.client = anthropic.AsyncAnthropic(base_url=base_url)
-        self.console = Console()
+        self.console = Console(force_terminal=True)
 
     async def think(
         self,
@@ -247,7 +247,7 @@ class OpenAIProvider:
         self.model = model
         self.max_tokens = max_tokens
         self.client = openai.AsyncOpenAI(api_key=api_key, base_url=base_url)
-        self.console = Console()
+        self.console = Console(force_terminal=True)
 
     async def think(
         self,

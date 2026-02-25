@@ -24,7 +24,7 @@ from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
 from providers import create_provider
 
-console = Console()
+console = Console(force_terminal=True)
 
 # Load environment variables from .env file
 load_dotenv()
