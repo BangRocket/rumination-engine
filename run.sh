@@ -8,13 +8,20 @@ set -e
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 cd "$SCRIPT_DIR"
 
+# Use the in-project virtualenv if it exists, otherwise fall back to system python3
+if [ -x ".venv/bin/python" ]; then
+    PYTHON=".venv/bin/python"
+else
+    PYTHON="python3"
+fi
+
 MIN_RESTART_INTERVAL=30  # seconds
 
 while true; do
     start_time=$(date +%s)
 
-    echo "[run.sh] Starting ruminate.py..."
-    poetry run python -u ruminate.py
+    echo "[run.sh] Starting ruminate.py (using $PYTHON)..."
+    $PYTHON -u ruminate.py
     exit_code=$?
 
     if [ $exit_code -ne 42 ]; then
