@@ -282,38 +282,43 @@ class OpenAIProvider:
 
             for attempt in range(3):
                 try:
-                    stream = await self.client.chat.completions.create(stream=True, **kwargs)
-                    async for chunk in stream:
-                        if not chunk.choices:
-                            continue
-                        delta = chunk.choices[0].delta
-                        if chunk.choices[0].finish_reason:
-                            finish_reason = chunk.choices[0].finish_reason
+                    msg_chars = sum(len(str(m.get("content", ""))) for m in oai_messages)
+                    log(f"OpenAI API call: iteration={iteration}, attempt={attempt}, messages={len(oai_messages)}, ~{msg_chars} content chars")
 
-                        # Stream text content
-                        if delta.content:
-                            sys.stdout.write(delta.content)
-                            sys.stdout.flush()
-                            accumulated_content += delta.content
+                    async def _stream_response():
+                        nonlocal accumulated_content, finish_reason
+                        stream = await self.client.chat.completions.create(stream=True, **kwargs)
+                        async for chunk in stream:
+                            if not chunk.choices:
+                                continue
+                            delta = chunk.choices[0].delta
+                            if chunk.choices[0].finish_reason:
+                                finish_reason = chunk.choices[0].finish_reason
 
-                        # Accumulate tool call deltas
-                        if delta.tool_calls:
-                            for tc_delta in delta.tool_calls:
-                                idx = tc_delta.index
-                                if idx not in accumulated_tool_calls:
-                                    accumulated_tool_calls[idx] = {
-                                        "id": tc_delta.id or "",
-                                        "name": tc_delta.function.name if tc_delta.function and tc_delta.function.name else "",
-                                        "arguments": "",
-                                    }
-                                entry = accumulated_tool_calls[idx]
-                                if tc_delta.id:
-                                    entry["id"] = tc_delta.id
-                                if tc_delta.function:
-                                    if tc_delta.function.name:
-                                        entry["name"] = tc_delta.function.name
-                                    if tc_delta.function.arguments:
-                                        entry["arguments"] += tc_delta.function.arguments
+                            if delta.content:
+                                sys.stdout.write(delta.content)
+                                sys.stdout.flush()
+                                accumulated_content += delta.content
+
+                            if delta.tool_calls:
+                                for tc_delta in delta.tool_calls:
+                                    idx = tc_delta.index
+                                    if idx not in accumulated_tool_calls:
+                                        accumulated_tool_calls[idx] = {
+                                            "id": tc_delta.id or "",
+                                            "name": tc_delta.function.name if tc_delta.function and tc_delta.function.name else "",
+                                            "arguments": "",
+                                        }
+                                    entry = accumulated_tool_calls[idx]
+                                    if tc_delta.id:
+                                        entry["id"] = tc_delta.id
+                                    if tc_delta.function:
+                                        if tc_delta.function.name:
+                                            entry["name"] = tc_delta.function.name
+                                        if tc_delta.function.arguments:
+                                            entry["arguments"] += tc_delta.function.arguments
+
+                    await asyncio.wait_for(_stream_response(), timeout=120)
                     break
                 except openai.BadRequestError as e:
                     err_msg = str(e).lower()
@@ -331,6 +336,16 @@ class OpenAIProvider:
                         finish_reason = None
                         break  # retry via outer loop
                     raise
+                except asyncio.TimeoutError:
+                    log(f"WARNING: Streaming timed out after 120s (attempt {attempt + 1}/3)")
+                    if attempt < 2:
+                        await asyncio.sleep(2 ** attempt)
+                        accumulated_content = ""
+                        accumulated_tool_calls.clear()
+                        finish_reason = None
+                        continue
+                    sys.stdout.write("\n")
+                    return f"[thought interrupted: streaming timed out]", tool_trace
                 except (openai.APIConnectionError, openai.APITimeoutError) as e:
                     log(f"WARNING: Transient API error (attempt {attempt + 1}/3): {e}")
                     if attempt < 2:
