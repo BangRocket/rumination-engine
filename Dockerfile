@@ -17,10 +17,11 @@ RUN npm install -g package-registry-mcp @modelcontextprotocol/server-filesystem
 # Pre-install uvx-based MCP servers
 RUN uv tool install mcp-server-fetch
 
-# Install dependencies
-COPY requirements.txt .
-RUN pip install --no-cache-dir --upgrade pip && \
-    pip install --no-cache-dir -r requirements.txt
+# Install Poetry and dependencies
+RUN pip install --no-cache-dir poetry
+COPY pyproject.toml poetry.lock ./
+RUN poetry config virtualenvs.create false && \
+    poetry install --no-interaction --no-ansi --only main
 
 # Copy application
 COPY ruminate.py providers.py ./

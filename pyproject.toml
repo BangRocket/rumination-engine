@@ -1,20 +1,18 @@
-[project]
+[tool.poetry]
 name = "rumination-engine"
 version = "0.1.0"
 description = "An input-less LLM thought experiment"
-authors = [
-    {name = "Joshua Heidorn"}
-]
+authors = ["Joshua Heidorn"]
 readme = "README.md"
-requires-python = "^3.12"
-dependencies = [
-    "anthropic (>=0.83.0,<0.84.0)",
-    "python-dotenv (>=1.2.1,<2.0.0)",
-    "rich (>=14.3.3,<15.0.0)",
-    "requests (>=2.32.5,<3.0.0)",
-    "mcp[cli] (>=1.0.0)"
-]
 
+[tool.poetry.dependencies]
+python = "^3.12"
+anthropic = ">=0.40.0"
+openai = ">=1.40.0"
+python-dotenv = "*"
+rich = "*"
+requests = "*"
+mcp = {version = ">=1.0.0", extras = ["cli"]}
 
 [build-system]
 requires = ["poetry-core>=2.0.0,<3.0.0"]
