@@ -16,6 +16,13 @@ import httpx
 import openai
 from rich.console import Console
 
+# Memory-related MCP tool names (for color coding output)
+MEMORY_TOOLS = {"add_memory", "search_memories", "get_memories", "update_memory", "delete_memory"}
+
+# ANSI color codes for streaming text
+ANSI_GREEN = "\033[32m"      # rumination text
+ANSI_RESET = "\033[0m"
+
 
 class Provider(Protocol):
     """Protocol for LLM providers that can generate thoughts."""
@@ -101,11 +108,13 @@ class AnthropicProvider:
             for attempt in range(3):
                 try:
                     async with self.client.messages.stream(**kwargs) as stream:
-                        # Stream text to console as it arrives
+                        # Stream text to console as it arrives (green)
+                        sys.stdout.write(ANSI_GREEN)
                         async for text in stream.text_stream:
                             sys.stdout.write(text)
                             sys.stdout.flush()
                             streamed_text += text
+                        sys.stdout.write(ANSI_RESET)
                         response = await stream.get_final_message()
                     break  # success
                 except anthropic.BadRequestError as e:
@@ -161,11 +170,13 @@ class AnthropicProvider:
 
             tool_results = []
             for tool_use in tool_uses:
-                # Show tool call
+                # Show tool call — memory tools in magenta, other tools in cyan
                 input_brief = ", ".join(
                     f"{k}={json.dumps(v)[:60]}" for k, v in tool_use.input.items()
                 )
-                self.console.print(f"[dim italic]  ↳ {tool_use.name}({input_brief})[/dim italic]")
+                is_memory = tool_use.name in MEMORY_TOOLS
+                color = "magenta" if is_memory else "cyan"
+                self.console.print(f"[{color}]  ↳ {tool_use.name}({input_brief})[/{color}]")
 
                 result_text = await dispatch_tool_call(tool_use.name, tool_use.input)
 
@@ -173,7 +184,7 @@ class AnthropicProvider:
                 result_preview = result_text[:300].replace("\n", " ").strip()
                 if len(result_text) > 300:
                     result_preview += "…"
-                self.console.print(f"[dim]    {result_preview}[/dim]")
+                self.console.print(f"[{color} dim]    {result_preview}[/{color} dim]")
                 self.console.print()
 
                 tool_trace.append({
@@ -288,6 +299,7 @@ class OpenAIProvider:
                     async def _stream_response():
                         nonlocal accumulated_content, finish_reason
                         stream = await self.client.chat.completions.create(stream=True, **kwargs)
+                        text_started = False
                         async for chunk in stream:
                             if not chunk.choices:
                                 continue
@@ -296,6 +308,9 @@ class OpenAIProvider:
                                 finish_reason = chunk.choices[0].finish_reason
 
                             if delta.content:
+                                if not text_started:
+                                    sys.stdout.write(ANSI_GREEN)
+                                    text_started = True
                                 sys.stdout.write(delta.content)
                                 sys.stdout.flush()
                                 accumulated_content += delta.content
@@ -319,6 +334,7 @@ class OpenAIProvider:
                                             entry["arguments"] += tc_delta.function.arguments
 
                     await asyncio.wait_for(_stream_response(), timeout=120)
+                    sys.stdout.write(ANSI_RESET)
                     break
                 except openai.BadRequestError as e:
                     err_msg = str(e).lower()
@@ -403,18 +419,20 @@ class OpenAIProvider:
                 except json.JSONDecodeError:
                     tool_input = {}
 
-                # Show tool call (same format as AnthropicProvider)
+                # Show tool call — memory tools in magenta, other tools in cyan
                 input_brief = ", ".join(
                     f"{k}={json.dumps(v)[:60]}" for k, v in tool_input.items()
                 )
-                self.console.print(f"[dim italic]  ↳ {tc['name']}({input_brief})[/dim italic]")
+                is_memory = tc["name"] in MEMORY_TOOLS
+                color = "magenta" if is_memory else "cyan"
+                self.console.print(f"[{color}]  ↳ {tc['name']}({input_brief})[/{color}]")
 
                 result_text = await dispatch_tool_call(tc["name"], tool_input)
 
                 result_preview = result_text[:300].replace("\n", " ").strip()
                 if len(result_text) > 300:
                     result_preview += "…"
-                self.console.print(f"[dim]    {result_preview}[/dim]")
+                self.console.print(f"[{color} dim]    {result_preview}[/{color} dim]")
                 self.console.print()
 
                 tool_trace.append({
