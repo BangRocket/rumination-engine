@@ -170,22 +170,14 @@ class AnthropicProvider:
 
             tool_results = []
             for tool_use in tool_uses:
-                # Show tool call — memory tools in magenta, other tools in cyan
                 input_brief = ", ".join(
                     f"{k}={json.dumps(v)[:60]}" for k, v in tool_use.input.items()
                 )
                 is_memory = tool_use.name in MEMORY_TOOLS
-                color = "magenta" if is_memory else "cyan"
+                color = "bright_magenta" if is_memory else "bright_blue"
                 self.console.print(f"[{color}]  ↳ {tool_use.name}({input_brief})[/{color}]")
 
                 result_text = await dispatch_tool_call(tool_use.name, tool_use.input)
-
-                # Show result (truncated, single line)
-                result_preview = result_text[:300].replace("\n", " ").strip()
-                if len(result_text) > 300:
-                    result_preview += "…"
-                self.console.print(f"[{color} dim]    {result_preview}[/{color} dim]")
-                self.console.print()
 
                 tool_trace.append({
                     "tool": tool_use.name,
@@ -419,21 +411,14 @@ class OpenAIProvider:
                 except json.JSONDecodeError:
                     tool_input = {}
 
-                # Show tool call — memory tools in magenta, other tools in cyan
                 input_brief = ", ".join(
                     f"{k}={json.dumps(v)[:60]}" for k, v in tool_input.items()
                 )
                 is_memory = tc["name"] in MEMORY_TOOLS
-                color = "magenta" if is_memory else "cyan"
+                color = "bright_magenta" if is_memory else "bright_blue"
                 self.console.print(f"[{color}]  ↳ {tc['name']}({input_brief})[/{color}]")
 
                 result_text = await dispatch_tool_call(tc["name"], tool_input)
-
-                result_preview = result_text[:300].replace("\n", " ").strip()
-                if len(result_text) > 300:
-                    result_preview += "…"
-                self.console.print(f"[{color} dim]    {result_preview}[/{color} dim]")
-                self.console.print()
 
                 tool_trace.append({
                     "tool": tc["name"],
