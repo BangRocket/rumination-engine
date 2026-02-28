@@ -1175,5 +1175,29 @@ async def main():
                 pass
 
 
+DASHBOARD_PORT = int(os.environ.get("DASHBOARD_PORT", "8080"))
+
+
+async def start():
+    """Start the thought loop and web dashboard concurrently."""
+    import uvicorn
+    from dashboard import app
+
+    config = uvicorn.Config(
+        app,
+        host="0.0.0.0",
+        port=DASHBOARD_PORT,
+        log_level="warning",
+    )
+    server = uvicorn.Server(config)
+
+    console.print(f"[dim]dashboard: http://0.0.0.0:{DASHBOARD_PORT}[/dim]")
+
+    await asyncio.gather(
+        server.serve(),
+        main(),
+    )
+
+
 if __name__ == "__main__":
-    asyncio.run(main())
+    asyncio.run(start())
