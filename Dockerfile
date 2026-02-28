@@ -24,7 +24,8 @@ RUN poetry config virtualenvs.create false && \
     poetry install --no-interaction --no-ansi --only main
 
 # Copy application
-COPY ruminate.py providers.py ./
+COPY ruminate.py providers.py dashboard.py ./
+COPY static/ ./static/
 
 # Create directories
 RUN mkdir -p /app/logs
