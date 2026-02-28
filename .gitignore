@@ -4,6 +4,10 @@
 # Logs
 logs/
 
+# Thought archive & self-prompt
+thoughts/
+next_prompt.txt
+
 # Migration dumps
 migration_dumps/
 
@@ -19,3 +23,5 @@ venv/
 *.swp
 
 .DS_Store
+
+workspace/

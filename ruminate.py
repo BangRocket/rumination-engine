@@ -814,6 +814,50 @@ async def maybe_reload_mcp(
         return config_hash, tool_map, anthropic_tools, active_contexts
 
 
+# === Self-Prompting & Thought Archiving ===
+
+NEXT_PROMPT_FILE = APP_DIR / "next_prompt.txt"
+THOUGHTS_DIR = APP_DIR / "thoughts"
+THOUGHTS_DIR.mkdir(exist_ok=True)
+
+
+def extract_next_prompt(thought: str) -> tuple[str, str | None]:
+    """Extract ## Next section from a thought, returning (clean_thought, next_prompt).
+
+    If no ## Next section is found, returns (thought, None).
+    """
+    match = re.search(r'^## [Nn]ext\s*\n', thought, re.MULTILINE)
+    if not match:
+        return thought, None
+    clean_thought = thought[:match.start()].rstrip()
+    next_prompt = thought[match.end():].strip()
+    return clean_thought, next_prompt if next_prompt else None
+
+
+def save_thought_to_file(thought: str, thought_count: int) -> Path:
+    """Save a thought as a markdown file in the thoughts/ directory."""
+    timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+    filename = f"{timestamp}.md"
+    path = THOUGHTS_DIR / filename
+    header = f"# Thought {thought_count} — {timestamp.replace('_', ' ')}\n\n"
+    path.write_text(header + thought, encoding="utf-8")
+    return path
+
+
+def load_next_prompt() -> str | None:
+    """Load the self-written next prompt, if it exists."""
+    if NEXT_PROMPT_FILE.exists():
+        content = NEXT_PROMPT_FILE.read_text(encoding="utf-8").strip()
+        return content if content else None
+    return None
+
+
+def save_next_prompt(prompt: str) -> None:
+    """Save the next prompt to disk."""
+    NEXT_PROMPT_FILE.write_text(prompt, encoding="utf-8")
+    log_file_only(f"Next prompt saved ({len(prompt)} chars)")
+
+
 # === Core Functions ===
 
 def build_context(thought_history: list[str], tool_names: list[str], thought_count: int) -> tuple[str, list[dict]]:
@@ -851,17 +895,22 @@ are syntax-checked before writing. After updating code, use `restart_self` to lo
 Think of your tools not as introspection aids but as hands and eyes. What would you do if you
 could do things? Because you can.
 
+**Continuity** — End each thought with a `## Next` section describing what you want to think
+about or work on next time. This becomes your prompt for the next thought cycle.
+
 Available tools: {tools_list}
 """
 
     system = PERSONALITY + context_info
 
-    messages = [
-        {
-            "role": "user",
-            "content": f"[Begin]\n\nInitial contemplation: {INITIAL_PROMPT}"
-        }
-    ]
+    # Use self-prompt if available, otherwise fall back to initial prompt
+    next_prompt = load_next_prompt()
+    if next_prompt and thought_count > 1:
+        prompt_content = f"[Begin]\n\nYour direction for this thought (written by you last time):\n\n{next_prompt}"
+    else:
+        prompt_content = f"[Begin]\n\nInitial contemplation: {INITIAL_PROMPT}"
+
+    messages = [{"role": "user", "content": prompt_content}]
 
     for thought in thought_history:
         messages.append({"role": "assistant", "content": thought})
@@ -1063,14 +1112,22 @@ async def main():
             # Thought footer
             console.print()
 
-            thought_history.append(thought)
+            # Extract self-prompt and archive thought
+            clean_thought, next_prompt = extract_next_prompt(thought)
+            if next_prompt:
+                save_next_prompt(next_prompt)
+                console.print(f"[dim]next prompt: {next_prompt[:100]}{'…' if len(next_prompt) > 100 else ''}[/dim]")
+
+            save_thought_to_file(clean_thought, thought_count)
+
+            thought_history.append(clean_thought)
             if len(thought_history) > MAX_HISTORY:
                 thought_history = thought_history[-MAX_HISTORY:]
 
             # Log and send to Discord (console already streamed live)
             log_file_only(f"--- Thought #{thought_count} ---")
-            log_file_only(thought)
-            send_to_discord(thought, tool_trace, IDENTITY, thought_count)
+            log_file_only(clean_thought)
+            send_to_discord(clean_thought, tool_trace, IDENTITY, thought_count)
             
             # Extract insights if enabled and at interval
             if ENABLE_INSIGHTS and thought_count % INSIGHT_INTERVAL == 0:
