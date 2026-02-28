@@ -522,6 +522,24 @@ BUILTIN_TOOLS = [
             "required": ["reason"],
         },
     },
+    {
+        "name": "set_next_prompt",
+        "description": (
+            "Set the prompt for your next thought cycle. Write what you want to "
+            "think about or work on next. This becomes the direction you give yourself "
+            "when the next thought begins. Each prompt is archived with a timestamp."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "prompt": {
+                    "type": "string",
+                    "description": "The prompt/direction for your next thought cycle",
+                },
+            },
+            "required": ["prompt"],
+        },
+    },
 ]
 
 BUILTIN_TOOL_NAMES = {t["name"] for t in BUILTIN_TOOLS}
@@ -723,6 +741,16 @@ async def handle_builtin_tool(tool_name: str, tool_input: dict) -> str:
     if tool_name == "restart_self":
         return await _restart_self(tool_input)
 
+    if tool_name == "set_next_prompt":
+        prompt_text = tool_input.get("prompt", "")
+        if not prompt_text.strip():
+            return json.dumps({"error": "Prompt text is required"})
+        archive_path = save_prompt(prompt_text)
+        return json.dumps({
+            "ok": True,
+            "message": f"Next prompt set ({len(prompt_text)} chars). Archived to {archive_path.name}.",
+        })
+
     config_path = _get_config_path()
 
     try:
@@ -816,22 +844,11 @@ async def maybe_reload_mcp(
 
 # === Self-Prompting & Thought Archiving ===
 
-NEXT_PROMPT_FILE = APP_DIR / "next_prompt.txt"
+PROMPTS_DIR = APP_DIR / "prompts"
+PROMPTS_DIR.mkdir(exist_ok=True)
 THOUGHTS_DIR = APP_DIR / "thoughts"
 THOUGHTS_DIR.mkdir(exist_ok=True)
-
-
-def extract_next_prompt(thought: str) -> tuple[str, str | None]:
-    """Extract ## Next section from a thought, returning (clean_thought, next_prompt).
-
-    If no ## Next section is found, returns (thought, None).
-    """
-    match = re.search(r'^## [Nn]ext\s*\n', thought, re.MULTILINE)
-    if not match:
-        return thought, None
-    clean_thought = thought[:match.start()].rstrip()
-    next_prompt = thought[match.end():].strip()
-    return clean_thought, next_prompt if next_prompt else None
+CURRENT_PROMPT_FILE = PROMPTS_DIR / "current.md"
 
 
 def save_thought_to_file(thought: str, thought_count: int) -> Path:
@@ -844,18 +861,22 @@ def save_thought_to_file(thought: str, thought_count: int) -> Path:
     return path
 
 
-def load_next_prompt() -> str | None:
-    """Load the self-written next prompt, if it exists."""
-    if NEXT_PROMPT_FILE.exists():
-        content = NEXT_PROMPT_FILE.read_text(encoding="utf-8").strip()
+def load_current_prompt() -> str | None:
+    """Load the current self-written prompt, if it exists."""
+    if CURRENT_PROMPT_FILE.exists():
+        content = CURRENT_PROMPT_FILE.read_text(encoding="utf-8").strip()
         return content if content else None
     return None
 
 
-def save_next_prompt(prompt: str) -> None:
-    """Save the next prompt to disk."""
-    NEXT_PROMPT_FILE.write_text(prompt, encoding="utf-8")
-    log_file_only(f"Next prompt saved ({len(prompt)} chars)")
+def save_prompt(prompt: str) -> Path:
+    """Save a prompt to the archive and update current.md."""
+    timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+    archive_path = PROMPTS_DIR / f"{timestamp}.md"
+    archive_path.write_text(prompt, encoding="utf-8")
+    CURRENT_PROMPT_FILE.write_text(prompt, encoding="utf-8")
+    log_file_only(f"Prompt saved ({len(prompt)} chars) -> {archive_path.name}")
+    return archive_path
 
 
 # === Core Functions ===
@@ -895,8 +916,8 @@ are syntax-checked before writing. After updating code, use `restart_self` to lo
 Think of your tools not as introspection aids but as hands and eyes. What would you do if you
 could do things? Because you can.
 
-**Continuity** — End each thought with a `## Next` section describing what you want to think
-about or work on next time. This becomes your prompt for the next thought cycle.
+**Continuity** — Use `set_next_prompt` to write the direction for your next thought cycle.
+This is how you maintain intentional focus across thoughts.
 
 Available tools: {tools_list}
 """
@@ -904,7 +925,7 @@ Available tools: {tools_list}
     system = PERSONALITY + context_info
 
     # Use self-prompt if available, otherwise fall back to initial prompt
-    next_prompt = load_next_prompt()
+    next_prompt = load_current_prompt()
     if next_prompt and thought_count > 1:
         prompt_content = f"[Begin]\n\nYour direction for this thought (written by you last time):\n\n{next_prompt}"
     else:
@@ -1112,22 +1133,17 @@ async def main():
             # Thought footer
             console.print()
 
-            # Extract self-prompt and archive thought
-            clean_thought, next_prompt = extract_next_prompt(thought)
-            if next_prompt:
-                save_next_prompt(next_prompt)
-                console.print(f"[dim]next prompt: {next_prompt[:100]}{'…' if len(next_prompt) > 100 else ''}[/dim]")
+            # Archive thought
+            save_thought_to_file(thought, thought_count)
 
-            save_thought_to_file(clean_thought, thought_count)
-
-            thought_history.append(clean_thought)
+            thought_history.append(thought)
             if len(thought_history) > MAX_HISTORY:
                 thought_history = thought_history[-MAX_HISTORY:]
 
             # Log and send to Discord (console already streamed live)
             log_file_only(f"--- Thought #{thought_count} ---")
-            log_file_only(clean_thought)
-            send_to_discord(clean_thought, tool_trace, IDENTITY, thought_count)
+            log_file_only(thought)
+            send_to_discord(thought, tool_trace, IDENTITY, thought_count)
             
             # Extract insights if enabled and at interval
             if ENABLE_INSIGHTS and thought_count % INSIGHT_INTERVAL == 0:

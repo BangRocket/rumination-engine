@@ -6,7 +6,7 @@ logs/
 
 # Thought archive & self-prompt
 thoughts/
-next_prompt.txt
+prompts/
 
 # Migration dumps
 migration_dumps/
