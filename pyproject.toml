@@ -14,6 +14,9 @@ python-dotenv = "*"
 rich = "*"
 requests = "*"
 mcp = {version = ">=1.0.0", extras = ["cli"]}
+fastapi = "*"
+uvicorn = "*"
+sse-starlette = "*"
 
 [build-system]
 requires = ["poetry-core>=2.0.0,<3.0.0"]
