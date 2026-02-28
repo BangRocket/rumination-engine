@@ -23,6 +23,7 @@ from rich.text import Text
 from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
 from providers import create_provider
+from dashboard import broadcast
 
 console = Console(force_terminal=True)
 
@@ -746,6 +747,7 @@ async def handle_builtin_tool(tool_name: str, tool_input: dict) -> str:
         if not prompt_text.strip():
             return json.dumps({"error": "Prompt text is required"})
         archive_path = save_prompt(prompt_text)
+        broadcast("prompt_set", {"prompt": prompt_text})
         return json.dumps({
             "ok": True,
             "message": f"Next prompt set ({len(prompt_text)} chars). Archived to {archive_path.name}.",
@@ -1111,6 +1113,10 @@ async def main():
 
             # Thought header
             timestamp = datetime.now().strftime("%H:%M:%S")
+            broadcast("thought_start", {
+                "thought_number": thought_count,
+                "timestamp": timestamp,
+            })
             console.rule(f"[dim]thought {thought_count} · {timestamp}[/dim]", style="dim")
 
             tool_names = [t["name"] for t in anthropic_tools]
@@ -1132,6 +1138,11 @@ async def main():
 
             # Thought footer
             console.print()
+            broadcast("thought_end", {
+                "thought_number": thought_count,
+                "thought": thought,
+                "timestamp": timestamp,
+            })
 
             # Archive thought
             save_thought_to_file(thought, thought_count)

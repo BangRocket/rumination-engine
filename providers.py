@@ -15,6 +15,7 @@ import anthropic
 import httpx
 import openai
 from rich.console import Console
+from dashboard import broadcast
 
 # Memory-related MCP tool names (for color coding output)
 MEMORY_TOOLS = {"add_memory", "search_memories", "get_memories", "update_memory", "delete_memory"}
@@ -114,6 +115,7 @@ class AnthropicProvider:
                             sys.stdout.write(text)
                             sys.stdout.flush()
                             streamed_text += text
+                            broadcast("thought_chunk", {"text": text})
                         sys.stdout.write(ANSI_RESET)
                         response = await stream.get_final_message()
                     break  # success
@@ -176,6 +178,11 @@ class AnthropicProvider:
                 is_memory = tool_use.name in MEMORY_TOOLS
                 color = "bright_magenta" if is_memory else "bright_blue"
                 self.console.print(f"[{color}]  ↳ {tool_use.name}({input_brief})[/{color}]")
+                broadcast("tool_call", {
+                    "name": tool_use.name,
+                    "args": input_brief,
+                    "is_memory": is_memory,
+                })
 
                 result_text = await dispatch_tool_call(tool_use.name, tool_use.input)
 
@@ -306,6 +313,7 @@ class OpenAIProvider:
                                 sys.stdout.write(delta.content)
                                 sys.stdout.flush()
                                 accumulated_content += delta.content
+                                broadcast("thought_chunk", {"text": delta.content})
 
                             if delta.tool_calls:
                                 for tc_delta in delta.tool_calls:
@@ -417,6 +425,11 @@ class OpenAIProvider:
                 is_memory = tc["name"] in MEMORY_TOOLS
                 color = "bright_magenta" if is_memory else "bright_blue"
                 self.console.print(f"[{color}]  ↳ {tc['name']}({input_brief})[/{color}]")
+                broadcast("tool_call", {
+                    "name": tc["name"],
+                    "args": input_brief,
+                    "is_memory": is_memory,
+                })
 
                 result_text = await dispatch_tool_call(tc["name"], tool_input)
 
