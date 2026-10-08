@@ -7,6 +7,7 @@ plus REST endpoints for archived thoughts and prompts.
 
 import asyncio
 import json
+from collections import deque
 from pathlib import Path
 
 from fastapi import FastAPI, Request
@@ -19,10 +20,20 @@ app = FastAPI(title="Rumination Engine")
 # SSE subscriber management
 _subscribers: list[asyncio.Queue] = []
 
+# Latest attention-layer events, so a freshly opened dashboard can render the
+# panel without waiting for the next cycle.
+_ATTENTION_EVENTS = {"attention_state", "codelet_proposals", "attention_decision"}
+_attention_latest: dict[str, dict] = {}
+_attention_decisions: deque = deque(maxlen=20)
+
 
 def broadcast(event: str, data: dict) -> None:
     """Push an event to all connected SSE subscribers."""
-    msg = {"event": event, "data": json.dumps(data)}
+    if event in _ATTENTION_EVENTS:
+        _attention_latest[event] = data
+        if event == "attention_decision":
+            _attention_decisions.append(data)
+    msg = {"event": event, "data": json.dumps(data, default=str)}
     dead = []
     for q in _subscribers:
         try:
@@ -109,6 +120,17 @@ async def get_current_prompt():
     if CURRENT_PROMPT_FILE.exists():
         return {"prompt": CURRENT_PROMPT_FILE.read_text(encoding="utf-8"), "source": "self"}
     return {"prompt": INITIAL_PROMPT, "source": "initial"}
+
+
+@app.get("/api/attention")
+async def get_attention():
+    """Latest attention state, proposals and recent decisions (empty when off)."""
+    return {
+        "enabled": bool(_attention_latest),
+        "state": _attention_latest.get("attention_state"),
+        "proposals": _attention_latest.get("codelet_proposals"),
+        "decisions": list(_attention_decisions),
+    }
 
 
 @app.get("/", response_class=HTMLResponse)

@@ -24,6 +24,17 @@ from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
 from providers import create_provider
 from dashboard import broadcast
+from attention import (
+    AttentionConfig,
+    AttentionRuntime,
+    RunLimits,
+    ThoughtEvent,
+    apply_attention_cue,
+    trim_history_to_budget,
+)
+from attention.evaluator import approx_tokens
+from attention.models import IDLE, SELF_MODIFYING_TOOLS, SUSPENDED
+from attention.storage import RunRecorder
 
 console = Console(force_terminal=True)
 
@@ -545,6 +556,20 @@ BUILTIN_TOOLS = [
 
 BUILTIN_TOOL_NAMES = {t["name"] for t in BUILTIN_TOOLS}
 
+# Run-level limits (PR 0). Set in main(); module default keeps legacy behaviour.
+RUN_LIMITS = RunLimits()
+
+# Indirection so tests can run the loop without real waits.
+_sleep = asyncio.sleep
+
+
+def active_builtin_tools() -> list[dict]:
+    """Built-in tools offered this run. Benchmark mode withholds self-modifying ones
+    so an experiment can't change its own control group."""
+    if not RUN_LIMITS.benchmark_mode:
+        return list(BUILTIN_TOOLS)
+    return [t for t in BUILTIN_TOOLS if t["name"] not in SELF_MODIFYING_TOOLS]
+
 
 def _get_config_path() -> str:
     """Return the resolved MCP config file path."""
@@ -733,6 +758,9 @@ async def handle_builtin_tool(tool_name: str, tool_input: dict) -> str:
     """Handle a built-in (non-MCP) tool call."""
     log_file_only(f"Built-in tool '{tool_name}' called with {tool_input}")
 
+    if RUN_LIMITS.benchmark_mode and tool_name in SELF_MODIFYING_TOOLS:
+        return json.dumps({"error": f"'{tool_name}' is disabled while BENCHMARK_MODE is on."})
+
     if tool_name == "run_command":
         return await _run_command(tool_input)
 
@@ -825,7 +853,7 @@ async def maybe_reload_mcp(
     try:
         config = load_mcp_config(identity)
         new_tool_map, new_anthropic_tools, new_active_contexts = await connect_mcp_servers(config)
-        new_anthropic_tools.extend(BUILTIN_TOOLS)
+        new_anthropic_tools.extend(active_builtin_tools())
 
         # Tear down old connections (BaseException catches CancelledError + ExceptionGroup)
         for ctx in reversed(active_contexts):
@@ -883,8 +911,17 @@ def save_prompt(prompt: str) -> Path:
 
 # === Core Functions ===
 
-def build_context(thought_history: list[str], tool_names: list[str], thought_count: int) -> tuple[str, list[dict]]:
-    """Build the message context from history and available tools."""
+def build_context(
+    thought_history: list[str],
+    tool_names: list[str],
+    thought_count: int,
+    attention_cue: str | None = None,
+) -> tuple[str, list[dict]]:
+    """Build the message context from history and available tools.
+
+    `attention_cue` is the single seam for the attention controller. When it is
+    None (always, unless ATTENTION_MODE=active) the output is the legacy context.
+    """
     current_time = datetime.now(tz=timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
     tools_list = ", ".join(tool_names) if tool_names else "none"
 
@@ -938,6 +975,9 @@ Available tools: {tools_list}
     for thought in thought_history:
         messages.append({"role": "assistant", "content": thought})
         messages.append({"role": "user", "content": "[Continue]"})
+
+    if attention_cue:
+        messages = apply_attention_cue(messages, attention_cue, INITIAL_PROMPT)
 
     return system, messages
 
@@ -1049,8 +1089,13 @@ Example output:
 
 async def main():
     """Main rumination loop."""
+    global RUN_LIMITS
     LLM_PROVIDER = os.environ.get("LLM_PROVIDER", "anthropic")
     provider = create_provider(LLM_PROVIDER)
+    RUN_LIMITS = RunLimits.from_env(base_dir=APP_DIR)
+    attention = AttentionRuntime(
+        AttentionConfig.from_env(base_dir=APP_DIR), broadcast=broadcast, log=log_file_only
+    )
 
     # Check if this is a restart
     restart_reason_file = APP_DIR / ".restart_reason"
@@ -1066,6 +1111,10 @@ async def main():
     log_file_only(f"Provider: {LLM_PROVIDER} ({provider.model})")
     log_file_only(f"Interval: {THOUGHT_INTERVAL}s")
     log_file_only(f"Identity: {IDENTITY}")
+    if attention.enabled:
+        log_file_only(f"Attention: {attention.mode}")
+    if RUN_LIMITS != RunLimits():
+        log_file_only(f"Run limits: {RUN_LIMITS}")
     log_file_only("=" * 60)
 
     console.print()
@@ -1080,18 +1129,43 @@ async def main():
     config_hash = _hash_file(config_path)
     config = load_mcp_config(IDENTITY)
     tool_map, anthropic_tools, active_contexts = await connect_mcp_servers(config)
-    anthropic_tools.extend(BUILTIN_TOOLS)
+    anthropic_tools.extend(active_builtin_tools())
 
     tool_names = [t["name"] for t in anthropic_tools]
     console.print(f"[dim]connected to MCP servers, {len(tool_names)} tools available[/dim]")
     if tool_names:
         console.print(f"[dim]tools: {', '.join(tool_names)}[/dim]")
+    if attention.enabled:
+        console.print(f"[dim]attention: {attention.mode}[/dim]")
     console.print()
 
     await seed_memories(tool_map)
 
+    recorder = None
+    if RUN_LIMITS.recording:
+        try:
+            recorder = RunRecorder(RUN_LIMITS.record_dir, {
+                "provider": LLM_PROVIDER,
+                "model": provider.model,
+                "max_tokens": getattr(provider, "max_tokens", None),
+                "temperature": getattr(provider, "temperature", None),
+                "thought_interval": THOUGHT_INTERVAL,
+                "max_history": MAX_HISTORY,
+                "history_token_budget": RUN_LIMITS.history_token_budget,
+                "identity": IDENTITY,
+                "initial_prompt_sha": hashlib.sha256(INITIAL_PROMPT.encode()).hexdigest()[:12],
+                "attention_mode": attention.mode,
+                "benchmark_mode": RUN_LIMITS.benchmark_mode,
+                "tools": tool_names,
+            })
+            log_file_only(f"Recording run to {recorder.path}")
+        except Exception as e:
+            log_file_only(f"WARNING: run recorder disabled: {e}")
+
     thought_history: list[str] = []
     thought_count = 0
+    run_started = time.time()
+    stop_reason = "interrupted"
 
     try:
         next_thought_time = time.time()
@@ -1099,7 +1173,28 @@ async def main():
         while True:
             wait_time = next_thought_time - time.time()
             if wait_time > 0:
-                await asyncio.sleep(wait_time)
+                await _sleep(wait_time)
+
+            limit_reason = RUN_LIMITS.exceeded(thought_count, time.time() - run_started)
+            if limit_reason:
+                stop_reason = limit_reason
+                log_file_only(f"Stopping: {limit_reason}")
+                console.print(f"[dim]stopping: {limit_reason}[/dim]")
+                break
+
+            # Attention seam 1: decide before spending any tokens.
+            decision = attention.before_cycle(thought_count + 1)
+            if attention.active and decision.action == SUSPENDED:
+                stop_reason = f"attention suspended: {decision.reason}"
+                log_file_only(f"Stopping: {stop_reason}")
+                console.print(f"[dim]attention suspended: {decision.reason}[/dim]")
+                break
+            if attention.active and decision.action == IDLE:
+                log_file_only(f"Attention idle {decision.wait_seconds:.0f}s: {decision.reason}")
+                console.print(f"[dim]idle {decision.wait_seconds:.0f}s · {decision.reason}[/dim]")
+                attention.note_idle(decision.wait_seconds)
+                next_thought_time = time.time() + decision.wait_seconds
+                continue
 
             thought_count += 1
             next_thought_time = time.time() + THOUGHT_INTERVAL
@@ -1119,9 +1214,21 @@ async def main():
             })
             console.rule(f"[dim]thought {thought_count} · {timestamp}[/dim]", style="dim")
 
+            # Attention seam 2: at most one cue, injected through build_context.
+            cue = attention.cue_text(decision)
+            if cue:
+                console.print(f"[dim]attention {decision.action.lower()} · {decision.source or 'controller'}[/dim]")
+
             tool_names = [t["name"] for t in anthropic_tools]
-            system, messages = build_context(thought_history, tool_names, thought_count)
+            context_history = (
+                trim_history_to_budget(thought_history, RUN_LIMITS.history_token_budget, log_file_only)
+                if RUN_LIMITS.history_token_budget else thought_history
+            )
+            system, messages = build_context(context_history, tool_names, thought_count, attention_cue=cue)
             history_end = len(messages)
+            context_chars = len(system) + sum(len(str(m.get("content", ""))) for m in messages)
+            self_prompt_before = load_current_prompt()
+            cycle_started = time.time()
 
             async def _dispatch(name, inp):
                 return await dispatch_tool_call(tool_map, name, inp)
@@ -1135,6 +1242,7 @@ async def main():
                 log=log_file_only,
                 max_tool_iterations=MAX_TOOL_ITERATIONS,
             )
+            cycle_seconds = time.time() - cycle_started
 
             # Thought footer
             console.print()
@@ -1155,7 +1263,42 @@ async def main():
             log_file_only(f"--- Thought #{thought_count} ---")
             log_file_only(thought)
             send_to_discord(thought, tool_trace, IDENTITY, thought_count)
-            
+
+            # Attention seam 3: codelets evaluate the finished thought (no model calls).
+            cycle_tokens = approx_tokens(
+                context_chars + len(thought) + sum(len(str(t.get("output", ""))) for t in tool_trace)
+            )
+            if attention.enabled or recorder:
+                event = ThoughtEvent.build(
+                    cycle=thought_count,
+                    thought=thought,
+                    tool_trace=tool_trace,
+                    timestamp=time.time(),
+                    duration_seconds=round(cycle_seconds, 2),
+                    approx_tokens=cycle_tokens,
+                    self_prompt=load_current_prompt(),
+                    applied_action=decision.action if attention.active else "CONTINUE",
+                    applied_cue_source=(decision.source if cue else None),
+                )
+                attention.after_cycle(event)
+                if recorder:
+                    try:
+                        recorder.record_cycle(
+                            cycle=thought_count,
+                            thought=thought,
+                            tool_trace=tool_trace,
+                            duration_seconds=round(cycle_seconds, 2),
+                            approx_tokens=cycle_tokens,
+                            self_prompt_before=self_prompt_before,
+                            self_prompt_after=event.self_prompt,
+                            attention_action=event.applied_action,
+                            attention_cue=cue,
+                            provider_error=event.provider_error,
+                            self_modifying_tools=event.self_modifying_tools,
+                        )
+                    except Exception as e:
+                        log_file_only(f"WARNING: run record failed: {e}")
+
             # Extract insights if enabled and at interval
             if ENABLE_INSIGHTS and thought_count % INSIGHT_INTERVAL == 0:
                 await extract_insights(provider, thought_history, tool_map, thought_count)
@@ -1167,12 +1310,23 @@ async def main():
         console.print()
         console.print(f"[dim]{thought_count} thoughts[/dim]")
         console.print()
+    except SystemExit as e:
+        stop_reason = "restart_self" if e.code == RESTART_EXIT_CODE else f"exit {e.code}"
+        raise
     finally:
+        attention.close(stop_reason)
+        if recorder:
+            try:
+                recorder.end(stop_reason, thoughts=thought_count, seconds=round(time.time() - run_started, 1))
+            except Exception:
+                pass
         for ctx in reversed(active_contexts):
             try:
                 await ctx.__aexit__(None, None, None)
             except BaseException:
                 pass
+
+    return stop_reason
 
 
 DASHBOARD_PORT = int(os.environ.get("DASHBOARD_PORT", "8080"))
@@ -1193,9 +1347,17 @@ async def start():
 
     console.print(f"[dim]dashboard: http://0.0.0.0:{DASHBOARD_PORT}[/dim]")
 
+    async def _main_then_stop_server():
+        try:
+            return await main()
+        finally:
+            # Let the process exit when the loop ends (run limits, suspension);
+            # without this the dashboard keeps the process alive forever.
+            server.should_exit = True
+
     await asyncio.gather(
         server.serve(),
-        main(),
+        _main_then_stop_server(),
     )
 
 

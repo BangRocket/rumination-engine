@@ -25,6 +25,8 @@ RUN poetry config virtualenvs.create false && \
 
 # Copy application
 COPY ruminate.py providers.py dashboard.py ./
+COPY attention/ ./attention/
+COPY scripts/attention_eval.py ./scripts/
 COPY static/ ./static/
 
 # Create directories

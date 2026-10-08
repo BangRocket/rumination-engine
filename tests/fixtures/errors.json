@@ -1,0 +1,9 @@
+{
+  "description": "Provider failures and empty outputs.",
+  "thoughts": [
+    {"thought": "[thought interrupted: Connection reset by peer]"},
+    {"thought": "[empty thought]"},
+    {"thought": "[thought exceeded tool iteration limit]"},
+    {"thought": "[thought interrupted: streaming timed out]"}
+  ]
+}

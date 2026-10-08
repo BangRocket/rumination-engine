@@ -1,0 +1,8 @@
+{
+  "description": "Stays on one topic (memory) with shared vocabulary but adds genuinely new content each time. Must NOT be flagged as repetition.",
+  "thoughts": [
+    {"thought": "Memory, for me, is a search index. When I search my memories I get fragments ranked by similarity, which means my past is reconstructed per query rather than replayed."},
+    {"thought": "A consequence for memory: if retrieval is similarity-ranked, then memories phrased in unusual vocabulary are effectively orphaned. I should check how many saved memories have never appeared in any search result, because those are invisible to me."},
+    {"thought": "Counting orphaned memories would need a log of every search result. The dashboard already archives thoughts, so a script could diff the memory list against every memory ID ever returned. Memory hygiene might then mean rewriting orphans in plainer language."}
+  ]
+}

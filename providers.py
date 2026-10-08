@@ -59,9 +59,11 @@ class Provider(Protocol):
 class AnthropicProvider:
     """Anthropic Claude provider for the Rumination Engine."""
 
-    def __init__(self, model: str, max_tokens: int, base_url: str | None = None):
+    def __init__(self, model: str, max_tokens: int, base_url: str | None = None,
+                 temperature: float | None = None):
         self.model = model
         self.max_tokens = max_tokens
+        self.temperature = temperature  # None = provider default (legacy behaviour)
         self.client = anthropic.AsyncAnthropic(base_url=base_url)
         self.console = Console(force_terminal=True)
 
@@ -103,6 +105,8 @@ class AnthropicProvider:
             }
             if cached_tools:
                 kwargs["tools"] = cached_tools
+            if self.temperature is not None:
+                kwargs["temperature"] = self.temperature
 
             response = None
             streamed_text = ""
@@ -242,9 +246,11 @@ def _to_openai_message(msg: dict) -> dict:
 class OpenAIProvider:
     """OpenAI-compatible provider for the Rumination Engine (z.ai/GLM 4.7, etc.)."""
 
-    def __init__(self, model: str, max_tokens: int, api_key: str, base_url: str | None = None):
+    def __init__(self, model: str, max_tokens: int, api_key: str, base_url: str | None = None,
+                 temperature: float | None = None):
         self.model = model
         self.max_tokens = max_tokens
+        self.temperature = temperature  # None = provider default (legacy behaviour)
         self.client = openai.AsyncOpenAI(api_key=api_key, base_url=base_url)
         self.console = Console(force_terminal=True)
 
@@ -282,6 +288,8 @@ class OpenAIProvider:
             }
             if openai_tools:
                 kwargs["tools"] = openai_tools
+            if self.temperature is not None:
+                kwargs["temperature"] = self.temperature
 
             # Accumulate streamed response manually (lower-level API avoids
             # the .stream() helper's "strict" tool schema requirement)
@@ -450,6 +458,17 @@ class OpenAIProvider:
         return thought, tool_trace
 
 
+def _env_temperature() -> float | None:
+    """LLM_TEMPERATURE for reproducible comparisons. Unset/invalid = provider default."""
+    raw = os.environ.get("LLM_TEMPERATURE", "").strip()
+    if not raw:
+        return None
+    try:
+        return float(raw)
+    except ValueError:
+        return None
+
+
 def create_provider(provider_name: str) -> AnthropicProvider | OpenAIProvider:
     """Factory function to create an LLM provider by name.
 
@@ -466,7 +485,8 @@ def create_provider(provider_name: str) -> AnthropicProvider | OpenAIProvider:
         model = os.environ.get("ANTHROPIC_MODEL", "claude-sonnet-4-20250514")
         max_tokens = int(os.environ.get("MAX_TOKENS", "1024"))
         base_url = os.environ.get("ANTHROPIC_BASE_URL")  # None = default
-        return AnthropicProvider(model=model, max_tokens=max_tokens, base_url=base_url)
+        return AnthropicProvider(model=model, max_tokens=max_tokens, base_url=base_url,
+                                 temperature=_env_temperature())
 
     if provider_name == "openai":
         api_key = os.environ.get("OPENAI_API_KEY", "")
@@ -477,6 +497,7 @@ def create_provider(provider_name: str) -> AnthropicProvider | OpenAIProvider:
             max_tokens=int(os.environ.get("MAX_TOKENS", "1024")),
             api_key=api_key,
             base_url=os.environ.get("OPENAI_BASE_URL"),
+            temperature=_env_temperature(),
         )
 
     raise ValueError(

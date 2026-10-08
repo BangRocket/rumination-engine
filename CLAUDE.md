@@ -54,6 +54,12 @@ Environment variables (see `.env.example`):
 - `MAX_HISTORY`: number of previous thoughts in context (default: 10)
 - `DISCORD_WEBHOOK_URL`: optional webhook for thought output
 
+## Attention Layer (`attention/`)
+
+Opt-in, LIDA-inspired attention controller between thought cycles (`ATTENTION_MODE=off|observe|active`, default `off` = legacy behaviour). Deterministic codelets (progress, repetition, contradiction, open questions, self-prompt) nominate next actions; a workspace ranks them; the controller picks `CONTINUE/REFRAME/REVISIT/EXPLORE/IDLE` and injects at most one cue via `build_context(..., attention_cue=...)`. All calls from `ruminate.py` go through the fail-open `AttentionRuntime`. Logs: `logs/attention.jsonl`; state: `logs/attention_state.json` (never mem0). Details: `docs/attention.md`. Tests: `python -m pytest`. Offline replay/report: `scripts/attention_eval.py`.
+
+Benchmark harness: `RUN_MAX_THOUGHTS`, `RUN_MAX_SECONDS`, `RUN_RECORD`, `BENCHMARK_MODE` (disables self-modifying tools), `HISTORY_TOKEN_BUDGET`, `LLM_TEMPERATURE`.
+
 ## AI Capabilities
 
 The ruminating AI has access to tools via MCP servers:

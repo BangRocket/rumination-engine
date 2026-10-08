@@ -1,0 +1,8 @@
+{
+  "description": "A position is stated, then reversed after new evidence.",
+  "thoughts": [
+    {"thought": "Having looked at how my memories come back, I believe that memory retrieval is chronological for me, since the most recent memories seem to surface first in every search I run."},
+    {"thought": "I ran three searches with deliberately old topics and the oldest memories came back first each time. I no longer think that memory retrieval is chronological for me; I now think that memory retrieval is not chronological for me at all, it is driven by topic similarity.",
+     "tool_trace": [{"tool": "search_memories", "input": {"query": "first week"}, "output": "results..."}, {"tool": "run_command", "input": {"command": "python3 order_check.py"}, "output": "{\"stdout\": \"oldest-first in 3/3\", \"exit_code\": 0}"}]}
+  ]
+}

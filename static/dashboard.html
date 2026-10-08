@@ -183,6 +183,48 @@
       white-space: nowrap;
     }
 
+    /* Attention panel */
+    .attention {
+      display: none;
+      border-bottom: 1px solid var(--border);
+      padding: 10px 16px 12px;
+      font-size: 12px;
+      flex-shrink: 0;
+      max-height: 55vh;
+      overflow-y: auto;
+    }
+    .attention.on { display: block; }
+    .att-head { display: flex; align-items: center; gap: 6px; margin-bottom: 8px; flex-wrap: wrap; }
+    .att-title { font-weight: 600; text-transform: uppercase; letter-spacing: 0.5px; color: var(--text-dim); margin-right: auto; }
+    .badge {
+      font-size: 10px; padding: 1px 6px; border-radius: 9px; border: 1px solid var(--border);
+      color: var(--text-dim); text-transform: uppercase; letter-spacing: 0.4px;
+    }
+    .badge.state-ENGAGED { color: var(--green); border-color: var(--green); }
+    .badge.state-REFLECTING { color: var(--accent); border-color: var(--accent); }
+    .badge.state-EXPLORING { color: var(--magenta); border-color: var(--magenta); }
+    .badge.state-STALLED, .badge.state-SUSPENDED { color: #f0883e; border-color: #f0883e; }
+    .badge.state-IDLE { color: var(--text-dim); }
+    .att-next { color: var(--text); margin-bottom: 4px; }
+    .att-next b { color: var(--accent); font-weight: 600; }
+    .att-cue {
+      color: var(--text); background: var(--bg); border-left: 2px solid var(--magenta);
+      padding: 4px 8px; margin: 4px 0; white-space: pre-wrap; word-break: break-word;
+      display: -webkit-box; -webkit-line-clamp: 4; -webkit-box-orient: vertical; overflow: hidden;
+    }
+    .att-cue[hidden] { display: none; }
+    .att-dim { color: var(--text-dim); word-break: break-word; }
+    .att-stats { display: grid; grid-template-columns: 1fr 1fr; gap: 2px 10px; margin: 8px 0; color: var(--text-dim); }
+    .att-stats span b { color: var(--text); font-weight: 500; }
+    .att-sub { margin-top: 8px; color: var(--text-dim); text-transform: uppercase; font-size: 10px; letter-spacing: 0.4px; }
+    .att-list { list-style: none; margin-top: 2px; }
+    .att-list li { padding: 2px 0; color: var(--text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .att-list li .k { color: var(--text-dim); }
+    .attention details summary { cursor: pointer; color: var(--text-dim); margin-top: 8px; font-size: 11px; }
+    .attention-note {
+      font-size: 11px; color: var(--magenta); padding: 2px 0 6px; opacity: 0.85;
+    }
+
     /* Thought detail overlay */
     .overlay {
       display: none;
@@ -253,6 +295,25 @@
     </div>
 
     <div class="sidebar">
+      <div class="attention" id="attention">
+        <div class="att-head">
+          <span class="att-title">Attention</span>
+          <span class="badge" id="attMode">off</span>
+          <span class="badge" id="attState">&mdash;</span>
+        </div>
+        <div class="att-next" id="attNext"></div>
+        <div class="att-cue" id="attCue" hidden></div>
+        <div class="att-dim" id="attReason"></div>
+        <div class="att-stats" id="attStats"></div>
+        <div class="att-sub">Open threads</div>
+        <ul class="att-list" id="attThreads"></ul>
+        <div class="att-sub">Cooldowns</div>
+        <ul class="att-list" id="attCooldowns"></ul>
+        <details>
+          <summary>Last nominations</summary>
+          <ul class="att-list" id="attNominees"></ul>
+        </details>
+      </div>
       <div class="sidebar-title">Recent Thoughts</div>
       <ul class="sidebar-list" id="thoughtList"></ul>
     </div>
@@ -337,6 +398,27 @@ function connect() {
     setPrompt(d.prompt);
   });
 
+  eventSource.addEventListener('attention_decision', (e) => {
+    const d = JSON.parse(e.data);
+    renderDecision(d);
+    if (d.applied && d.action !== 'CONTINUE') {
+      const el = document.createElement('div');
+      el.className = 'attention-note';
+      const wait = d.action === 'IDLE' ? ` ${Math.round(d.wait_seconds)}s` : '';
+      el.textContent = `\u25c6 attention: ${d.action}${wait}${d.source ? ' (' + d.source + ')' : ''} \u2014 ${d.reason || ''}`;
+      stream.appendChild(el);
+      scrollToBottom();
+    }
+  });
+
+  eventSource.addEventListener('attention_state', (e) => {
+    renderAttentionState(JSON.parse(e.data));
+  });
+
+  eventSource.addEventListener('codelet_proposals', (e) => {
+    renderNominees(JSON.parse(e.data));
+  });
+
   eventSource.addEventListener('ping', () => {});
 
   eventSource.onerror = () => {
@@ -355,6 +437,98 @@ function setStatus(state, text) {
 function setPrompt(text) {
   promptEl.textContent = text || 'No prompt set';
   promptEl.className = 'prompt-text' + (text ? '' : ' empty');
+}
+
+// --- Attention panel ---
+const attEl = document.getElementById('attention');
+function showAttention() { attEl.classList.add('on'); }
+
+function setBadge(el, text, cls) {
+  el.textContent = text || '\u2014';
+  el.className = 'badge' + (cls ? ' ' + cls : '');
+}
+
+function renderDecision(d) {
+  if (!d) return;
+  showAttention();
+  setBadge(document.getElementById('attMode'), d.mode);
+  setBadge(document.getElementById('attState'), d.state, 'state-' + d.state);
+  const next = document.getElementById('attNext');
+  next.innerHTML = '';
+  const b = document.createElement('b');
+  b.textContent = d.action + (d.action === 'IDLE' ? ` ${Math.round(d.wait_seconds)}s` : '');
+  next.appendChild(b);
+  const meta = [];
+  if (d.cycle) meta.push('for thought ' + d.cycle);
+  if (d.source) meta.push(d.source);
+  if (d.priority) meta.push('score ' + Number(d.priority).toFixed(2));
+  if (!d.applied) meta.push('not applied');
+  if (d.overrode_self_prompt) meta.push('self-prompt deferred');
+  next.appendChild(document.createTextNode(meta.length ? ' \u00b7 ' + meta.join(' \u00b7 ') : ''));
+  const cue = document.getElementById('attCue');
+  cue.hidden = !d.cue;
+  cue.textContent = d.cue || '';
+  document.getElementById('attReason').textContent =
+    [d.reason, d.evidence].filter(Boolean).join(' \u2014 ');
+}
+
+function renderAttentionState(s) {
+  if (!s || s.enabled === false) return;
+  showAttention();
+  setBadge(document.getElementById('attMode'), s.mode);
+  setBadge(document.getElementById('attState'), s.fsm_state, 'state-' + s.fsm_state);
+  const stats = [
+    ['stall streak', s.consecutive_stalls], ['longest', s.longest_stall_streak],
+    ['redirects', s.consecutive_redirects], ['interventions', s.interventions],
+    ['idle', (s.idle_seconds_total || 0) + 's'], ['~tokens', s.approx_tokens_total],
+    ['errors', s.consecutive_errors], ['faults', s.faults || 0],
+  ];
+  const statsEl = document.getElementById('attStats');
+  statsEl.innerHTML = '';
+  stats.forEach(([k, v]) => {
+    const sp = document.createElement('span');
+    sp.textContent = k + ' ';
+    const bb = document.createElement('b');
+    bb.textContent = v ?? 0;
+    sp.appendChild(bb);
+    statsEl.appendChild(sp);
+  });
+  fillList('attThreads', (s.open_threads || []).slice().reverse().slice(0, 4),
+    (t) => [`#${t.created_cycle}${t.revisits ? ' \u21bb' + t.revisits : ''} `, t.text],
+    `${s.open_thread_count || 0} open`);
+  fillList('attCooldowns', Object.entries(s.cooldowns || {}).slice(0, 4),
+    ([k, v]) => [`@${v} `, k], 'none');
+  if (s.pending) renderDecision(s.pending);
+}
+
+function renderNominees(p) {
+  if (!p) return;
+  showAttention();
+  fillList('attNominees', (p.nominees || []).slice(0, 8),
+    (n) => [`${Number(n.score).toFixed(2)} ${n.action} `, `${n.source}: ${n.evidence}`], 'none');
+}
+
+function fillList(id, items, fmt, emptyText) {
+  const ul = document.getElementById(id);
+  ul.innerHTML = '';
+  if (!items.length) {
+    const li = document.createElement('li');
+    li.className = 'k';
+    li.textContent = emptyText;
+    ul.appendChild(li);
+    return;
+  }
+  items.forEach((it) => {
+    const [k, v] = fmt(it);
+    const li = document.createElement('li');
+    const ks = document.createElement('span');
+    ks.className = 'k';
+    ks.textContent = k;
+    li.appendChild(ks);
+    li.appendChild(document.createTextNode(v));
+    li.title = v;
+    ul.appendChild(li);
+  });
 }
 
 // --- Sidebar ---
@@ -394,6 +568,17 @@ async function loadInitial() {
     const d = await r.json();
     setPrompt(d.prompt);
   } catch { setPrompt(null); }
+
+  try {
+    const r = await fetch('/api/attention');
+    const d = await r.json();
+    if (d.enabled) {
+      const last = (d.decisions || []).slice(-1)[0];
+      if (last) renderDecision(last);
+      renderAttentionState(d.state);  // pending (next) decision wins
+      renderNominees(d.proposals);
+    }
+  } catch {}
 
   try {
     const r = await fetch('/api/thoughts');
